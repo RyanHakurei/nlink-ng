@@ -1,0 +1,390 @@
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
+use std::path::PathBuf;
+use std::ptr;
+
+use crate::device;
+use crate::error::Result;
+
+#[repr(C)]
+pub struct NLinkString {
+  pub data: *mut c_char,
+  pub len: usize,
+}
+
+impl NLinkString {
+  fn from_str(s: &str) -> Self {
+    match CString::new(s) {
+      Ok(c) => {
+        let len = c.as_bytes().len();
+        NLinkString {
+          data: c.into_raw(),
+          len,
+        }
+      }
+      Err(_) => NLinkString {
+        data: ptr::null_mut(),
+        len: 0,
+      },
+    }
+  }
+
+  fn empty() -> Self {
+    NLinkString {
+      data: ptr::null_mut(),
+      len: 0,
+    }
+  }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nlink_string_free(s: NLinkString) {
+  if !s.data.is_null() {
+    drop(CString::from_raw(s.data));
+  }
+}
+
+fn cstr<'a>(p: *const c_char) -> Result<&'a str> {
+  if p.is_null() {
+    return Err("null string".into());
+  }
+  unsafe { CStr::from_ptr(p) }
+    .to_str()
+    .map_err(|_| crate::error::NlinkError::from("invalid utf-8"))
+}
+
+fn fill_ok(out: *mut NLinkString, value: &str) {
+  if !out.is_null() {
+    unsafe { *out = NLinkString::from_str(value) };
+  }
+}
+
+fn fill_err(err: *mut NLinkString, e: impl ToString) -> c_int {
+  if !err.is_null() {
+    unsafe { *err = NLinkString::from_str(&e.to_string()) };
+  }
+  -1
+}
+
+fn fill_empty(p: *mut NLinkString) {
+  if !p.is_null() {
+    unsafe { *p = NLinkString::empty() };
+  }
+}
+
+pub type NLinkProgressCb = Option<extern "C" fn(*mut c_void, u64, u64)>;
+
+fn progress_fn(cb: NLinkProgressCb, user: *mut c_void) -> impl FnMut(usize) {
+  let mut last_total = 0usize;
+  move |remaining: usize| {
+    if last_total < remaining {
+      last_total = remaining;
+    }
+    let total = last_total.max(remaining);
+    if let Some(cb) = cb {
+      cb(user, remaining as u64, total as u64);
+    }
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_enumerate(out_json: *mut NLinkString, out_err: *mut NLinkString) -> c_int {
+  fill_empty(out_json);
+  fill_empty(out_err);
+  match device::enumerate() {
+    Ok(list) => match serde_json::to_string(&list) {
+      Ok(json) => {
+        fill_ok(out_json, &json);
+        0
+      }
+      Err(e) => fill_err(out_err, e),
+    },
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_open(
+  bus: u8,
+  addr: u8,
+  out_json: *mut NLinkString,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_json);
+  fill_empty(out_err);
+  match device::open(bus, addr) {
+    Ok(info) => match serde_json::to_string(&info) {
+      Ok(json) => {
+        fill_ok(out_json, &json);
+        0
+      }
+      Err(e) => fill_err(out_err, e),
+    },
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_close(bus: u8, addr: u8, out_err: *mut NLinkString) -> c_int {
+  fill_empty(out_err);
+  match device::close(bus, addr) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_info(
+  bus: u8,
+  addr: u8,
+  out_json: *mut NLinkString,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_json);
+  fill_empty(out_err);
+  match device::info(bus, addr) {
+    Ok(info) => match serde_json::to_string(&info) {
+      Ok(json) => {
+        fill_ok(out_json, &json);
+        0
+      }
+      Err(e) => fill_err(out_err, e),
+    },
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_list_dir(
+  bus: u8,
+  addr: u8,
+  path: *const c_char,
+  out_json: *mut NLinkString,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_json);
+  fill_empty(out_err);
+  let path = match cstr(path) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  match device::list_dir(bus, addr, path) {
+    Ok(list) => match serde_json::to_string(&list) {
+      Ok(json) => {
+        fill_ok(out_json, &json);
+        0
+      }
+      Err(e) => fill_err(out_err, e),
+    },
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_download_file(
+  bus: u8,
+  addr: u8,
+  remote: *const c_char,
+  size: u64,
+  dest_dir: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let remote = match cstr(remote) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  let dest = match cstr(dest_dir) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  match device::download_file(bus, addr, remote, size, &dest, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_download_dir(
+  bus: u8,
+  addr: u8,
+  remote: *const c_char,
+  dest_dir: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let remote = match cstr(remote) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  let dest = match cstr(dest_dir) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  match device::download_dir(bus, addr, remote, &dest, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_upload_file(
+  bus: u8,
+  addr: u8,
+  dest_dir: *const c_char,
+  src: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let dest_dir = match cstr(dest_dir) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  let src = match cstr(src) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  match device::upload_file(bus, addr, dest_dir, &src, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_mkdir(
+  bus: u8,
+  addr: u8,
+  path: *const c_char,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let path = match cstr(path) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  match device::mkdir(bus, addr, path) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_rm(
+  bus: u8,
+  addr: u8,
+  path: *const c_char,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let path = match cstr(path) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  match device::rm(bus, addr, path) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_rmdir(
+  bus: u8,
+  addr: u8,
+  path: *const c_char,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let path = match cstr(path) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  match device::rmdir(bus, addr, path) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_move(
+  bus: u8,
+  addr: u8,
+  src: *const c_char,
+  dest: *const c_char,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let src = match cstr(src) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  let dest = match cstr(dest) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  match device::move_file(bus, addr, src, dest) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_copy(
+  bus: u8,
+  addr: u8,
+  src: *const c_char,
+  dest: *const c_char,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let src = match cstr(src) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  let dest = match cstr(dest) {
+    Ok(p) => p,
+    Err(e) => return fill_err(out_err, e),
+  };
+  match device::copy_file(bus, addr, src, dest) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_upload_os(
+  bus: u8,
+  addr: u8,
+  src: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let src = match cstr(src) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  match device::upload_os(bus, addr, &src, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_cli_run() -> c_int {
+  if crate::cli::run() {
+    0
+  } else {
+    -1
+  }
+}

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=nlink-ng
+GenericName=TI-Nspire Linker
+Comment=Native linking program for TI-Nspire calculators
+Exec=n-link
+Icon=nlink-ng
+Terminal=false
+Categories=Utility;Education;Qt;
+StartupNotify=true
+StartupWMClass=nlink-ng
