@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
   QApplication app(argc, argv);
   QApplication::setApplicationName("nlink-ng");
   QApplication::setOrganizationName("nlink-ng");
-  QApplication::setApplicationVersion("0.2.0");
+  QApplication::setApplicationVersion("0.5.0");
   QApplication::setWindowIcon(QIcon(":/icons/icon.png"));
 
   MainWindow window;
