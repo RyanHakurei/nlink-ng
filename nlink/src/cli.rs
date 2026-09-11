@@ -25,6 +25,10 @@ enum SubCommand {
   Rmdir(Rmdir),
   Rm(Rm),
   Ls(Ls),
+  /// Backup the calculator filesystem to a .tar.gz archive
+  Backup(Backup),
+  /// Restore files from a .tar.gz backup onto the calculator
+  Restore(Restore),
   /// View license information
   License,
 }
@@ -108,6 +112,43 @@ struct Rm {
 struct Ls {
   /// Path to directory
   path: String,
+}
+
+/// Backup the calculator filesystem to a gzip-compressed tar archive
+#[derive(Parser, Debug)]
+struct Backup {
+  /// Destination .tar.gz path
+  #[arg(default_value = "nlink-ng-backup.tar.gz")]
+  dest: PathBuf,
+}
+
+/// Restore a .tar.gz backup onto the calculator
+#[derive(Parser, Debug)]
+struct Restore {
+  /// Path to the .tar.gz backup
+  archive: PathBuf,
+}
+
+fn open_mapped_device() -> Option<(u8, u8)> {
+  match crate::device::enumerate() {
+    Ok(list) => {
+      let Some(dev) = list.first() else {
+        eprintln!("Couldn't find any device");
+        return None;
+      };
+      let bus = dev.bus_number;
+      let addr = dev.address;
+      if let Err(error) = crate::device::open(bus, addr) {
+        eprintln!("Failed to initialize calculator: {}", error);
+        return None;
+      }
+      Some((bus, addr))
+    }
+    Err(error) => {
+      eprintln!("Failed to enumerate USB devices: {}", error);
+      None
+    }
+  }
 }
 
 fn get_dev() -> Option<libnspire::Handle<rusb::GlobalContext>> {
@@ -558,6 +599,26 @@ pub fn run() -> bool {
           }
         } else {
           eprintln!("Couldn't find any device");
+        }
+      }
+      SubCommand::Backup(Backup { dest }) => {
+        if let Some((bus, addr)) = open_mapped_device() {
+          let dest = cwd().join(&dest);
+          println!("Backing up calculator to {}", dest.display());
+          match crate::device::backup(bus, addr, &dest, &mut |_| {}) {
+            Ok(()) => println!("Backup {}: Ok", dest.display()),
+            Err(error) => eprintln!("Backup failed: {}", error),
+          }
+        }
+      }
+      SubCommand::Restore(Restore { archive }) => {
+        if let Some((bus, addr)) = open_mapped_device() {
+          let archive = cwd().join(&archive);
+          println!("Restoring {} onto calculator", archive.display());
+          match crate::device::restore(bus, addr, &archive, &mut |_| {}) {
+            Ok(()) => println!("Restore {}: Ok", archive.display()),
+            Err(error) => eprintln!("Restore failed: {}", error),
+          }
         }
       }
       SubCommand::License => {

@@ -23,6 +23,8 @@ add_executable(n-link
   src/main.cpp
   src/MainWindow.cpp
   src/MainWindow.h
+  src/PathNavigator.cpp
+  src/PathNavigator.h
   icons.qrc
 )
 add_dependencies(n-link nlink_rust)

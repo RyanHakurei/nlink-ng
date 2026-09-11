@@ -191,6 +191,92 @@ pub fn info(bus: u8, addr: u8) -> Result<libnspire::info::Info> {
   with_handle(bus, addr, |h| Ok(h.info()?))
 }
 
+const ZEHN_SIGNATURE: u32 = 0x6e68_655a; // "Zehn"
+const ZEHN_FLAG_EXECUTABLE_VERSION: u8 = 10;
+
+fn format_ndless_version(v: u32) -> String {
+  if (2000..=2099).contains(&v) {
+    format!("r{v}")
+  } else if (20..100).contains(&v) {
+    format!("{}.{}", v / 10, v % 10)
+  } else {
+    v.to_string()
+  }
+}
+
+fn zehn_executable_version(data: &[u8]) -> Option<u32> {
+  let limit = data.len().min(20 * 1024).saturating_sub(32);
+  let mut i = 0;
+  while i <= limit {
+    let sig = u32::from_le_bytes(data[i..i + 4].try_into().ok()?);
+    let ver = u32::from_le_bytes(data[i + 4..i + 8].try_into().ok()?);
+    if sig == ZEHN_SIGNATURE && ver == 1 {
+      let reloc_count = u32::from_le_bytes(data[i + 12..i + 16].try_into().ok()?) as usize;
+      let flag_count = u32::from_le_bytes(data[i + 16..i + 20].try_into().ok()?) as usize;
+      let flags_off = i.checked_add(32)?.checked_add(reloc_count.checked_mul(4)?)?;
+      let flags_end = flags_off.checked_add(flag_count.checked_mul(4)?)?;
+      if flags_end > data.len() {
+        return None;
+      }
+      for f in 0..flag_count {
+        let off = flags_off + f * 4;
+        let raw = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+        let ftype = (raw & 0xff) as u8;
+        let fdata = raw >> 8;
+        if ftype == ZEHN_FLAG_EXECUTABLE_VERSION {
+          return Some(fdata);
+        }
+      }
+      return None;
+    }
+    i += 4;
+  }
+  None
+}
+
+/// Returns a display version such as `r2022` or `4.5` if Ndless resources are
+/// on the calculator. `None` if Ndless does not appear to be installed.
+pub fn detect_ndless(bus: u8, addr: u8) -> Option<String> {
+  const CANDIDATE_DIRS: &[&str] = &["/ndless", "ndless", "/documents/ndless"];
+  for dir in CANDIDATE_DIRS {
+    let entries = match list_dir(bus, addr, dir) {
+      Ok(e) => e,
+      Err(_) => continue,
+    };
+    let resources = match entries
+      .iter()
+      .find(|e| !e.is_dir && e.path.eq_ignore_ascii_case("ndless_resources.tns"))
+    {
+      Some(e) => e,
+      None => continue,
+    };
+    let remote = if dir.ends_with('/') {
+      format!("{dir}{}", resources.path)
+    } else {
+      format!("{dir}/{}", resources.path)
+    };
+    let size = resources.size;
+    if size == 0 || size > 4 * 1024 * 1024 {
+      return Some(String::new());
+    }
+    let bytes = with_handle(bus, addr, |h| {
+      let len = usize::try_from(size).map_err(|_| NlinkError::from("too large"))?;
+      let mut buf = vec![0; len];
+      h.read_file(&remote, &mut buf, &mut |_| {})?;
+      Ok(buf)
+    });
+    return match bytes {
+      Ok(buf) => Some(
+        zehn_executable_version(&buf)
+          .map(format_ndless_version)
+          .unwrap_or_default(),
+      ),
+      Err(_) => Some(String::new()),
+    };
+  }
+  None
+}
+
 pub fn list_dir(bus: u8, addr: u8, path: &str) -> Result<Vec<FileInfo>> {
   let path = if path.is_empty() { "/" } else { path };
   with_handle(bus, addr, |h| {
@@ -342,4 +428,192 @@ pub fn upload_os(bus: u8, addr: u8, src: &Path, progress: &mut dyn FnMut(usize))
     h.send_os(&buf, progress)?;
     Ok(())
   })
+}
+
+fn skip_backup_name(name: &str) -> bool {
+  name.is_empty()
+    || name == "."
+    || name == ".."
+    || name.eq_ignore_ascii_case("NspireLogs.zip")
+}
+
+struct TreeEntry {
+  remote: String,
+  is_dir: bool,
+  size: u64,
+}
+
+fn collect_tree(bus: u8, addr: u8, remote: &str, out: &mut Vec<TreeEntry>) -> Result<()> {
+  let entries = list_dir(bus, addr, remote)?;
+  for entry in entries {
+    if skip_backup_name(&entry.path) {
+      continue;
+    }
+    let child = join_nspire_path(remote, &entry.path);
+    if entry.is_dir {
+      out.push(TreeEntry {
+        remote: child.clone(),
+        is_dir: true,
+        size: 0,
+      });
+      collect_tree(bus, addr, &child, out)?;
+    } else {
+      out.push(TreeEntry {
+        remote: child,
+        is_dir: false,
+        size: entry.size,
+      });
+    }
+  }
+  Ok(())
+}
+
+fn tar_path(remote: &str) -> Result<String> {
+  let p = remote.trim_start_matches('/').replace('\\', "/");
+  if p.is_empty() || p.split('/').any(|s| s == ".." || s == ".") {
+    return Err(NlinkError::from("Invalid backup path"));
+  }
+  Ok(p)
+}
+
+fn calc_path_from_tar(name: &str) -> Result<String> {
+  let normalized = name.replace('\\', "/");
+  let parts: Vec<&str> = normalized
+    .split('/')
+    .filter(|s| !s.is_empty() && *s != ".")
+    .collect();
+  if parts.is_empty() || parts.iter().any(|s| *s == "..") {
+    return Err(NlinkError::from("Refusing to restore an unsafe path"));
+  }
+  Ok(format!("/{}", parts.join("/")))
+}
+
+fn mkdir_exists_ok(bus: u8, addr: u8, path: &str) -> Result<()> {
+  if path.is_empty() || path == "/" {
+    return Ok(());
+  }
+  match mkdir(bus, addr, path) {
+    Ok(()) => Ok(()),
+    Err(e) => {
+      if list_dir(bus, addr, path).is_ok() {
+        Ok(())
+      } else {
+        let msg = e.to_string().to_lowercase();
+        if msg.contains("exist") {
+          Ok(())
+        } else {
+          Err(e)
+        }
+      }
+    }
+  }
+}
+
+fn ensure_dir(bus: u8, addr: u8, path: &str) -> Result<()> {
+  let trimmed = path.trim_matches('/');
+  if trimmed.is_empty() {
+    return Ok(());
+  }
+  let mut cur = String::new();
+  for part in trimmed.split('/') {
+    if part.is_empty() {
+      continue;
+    }
+    cur.push('/');
+    cur.push_str(part);
+    mkdir_exists_ok(bus, addr, &cur)?;
+  }
+  Ok(())
+}
+
+/// Backup the calculator filesystem to a `.tar.gz`. Skips `NspireLogs.zip`.
+pub fn backup(bus: u8, addr: u8, dest: &Path, progress: &mut dyn FnMut(usize)) -> Result<()> {
+  let mut tree = Vec::new();
+  collect_tree(bus, addr, "/", &mut tree)?;
+  let file = File::create(dest)?;
+  let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+  let mut archive = tar::Builder::new(encoder);
+  let mut wrote = 0u32;
+  for entry in &tree {
+    let tar_name = match tar_path(&entry.remote) {
+      Ok(n) => n,
+      Err(_) => continue,
+    };
+    if entry.is_dir {
+      let mut header = tar::Header::new_gnu();
+      header.set_path(&tar_name)?;
+      header.set_entry_type(tar::EntryType::Directory);
+      header.set_mode(0o755);
+      header.set_size(0);
+      header.set_cksum();
+      archive.append(&header, std::io::empty())?;
+      wrote += 1;
+      continue;
+    }
+    if entry.size > MAX_FILE_SIZE {
+      continue;
+    }
+    let buf = match with_handle(bus, addr, |h| {
+      let len = usize::try_from(entry.size).map_err(|_| NlinkError::from("too large"))?;
+      let mut buf = vec![0; len];
+      h.read_file(&entry.remote, &mut buf, progress)?;
+      Ok(buf)
+    }) {
+      Ok(b) => b,
+      Err(_) => continue,
+    };
+    let mut header = tar::Header::new_gnu();
+    header.set_path(&tar_name)?;
+    header.set_mode(0o644);
+    header.set_size(buf.len() as u64);
+    header.set_cksum();
+    archive.append(&header, buf.as_slice())?;
+    wrote += 1;
+  }
+  let encoder = archive.into_inner()?;
+  encoder.finish()?;
+  if wrote == 0 {
+    return Err(NlinkError::from("Backup contained no files"));
+  }
+  Ok(())
+}
+
+/// Restore files from a `.tar.gz` created by [`backup`]. Existing files may be overwritten.
+pub fn restore(bus: u8, addr: u8, src: &Path, progress: &mut dyn FnMut(usize)) -> Result<()> {
+  let file = File::open(src)?;
+  let decoder = flate2::read::GzDecoder::new(file);
+  let mut archive = tar::Archive::new(decoder);
+  let mut restored = 0u32;
+  for entry in archive.entries()? {
+    let mut entry = entry?;
+    let name = entry.path()?.to_string_lossy().into_owned();
+    let remote = match calc_path_from_tar(&name) {
+      Ok(p) => p,
+      Err(_) => continue,
+    };
+    if entry.header().entry_type().is_dir() {
+      ensure_dir(bus, addr, &remote)?;
+      restored += 1;
+      continue;
+    }
+    if let Some(parent) = Path::new(&remote).parent() {
+      ensure_dir(bus, addr, &parent.to_string_lossy())?;
+    }
+    let mut buf = Vec::new();
+    entry.read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_FILE_SIZE {
+      continue;
+    }
+    match with_handle(bus, addr, |h| {
+      h.write_file(&remote, &buf, progress)?;
+      Ok(())
+    }) {
+      Ok(()) => restored += 1,
+      Err(_) => continue,
+    }
+  }
+  if restored == 0 {
+    return Err(NlinkError::from("Restore wrote no files"));
+  }
+  Ok(())
 }

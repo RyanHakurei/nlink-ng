@@ -38,6 +38,10 @@ int nlink_copy(uint8_t bus, uint8_t addr, const char *src, const char *dest,
                NLinkString *out_err);
 int nlink_upload_os(uint8_t bus, uint8_t addr, const char *src, NLinkProgressCb cb, void *user,
                     NLinkString *out_err);
+int nlink_backup(uint8_t bus, uint8_t addr, const char *dest, NLinkProgressCb cb, void *user,
+                 NLinkString *out_err);
+int nlink_restore(uint8_t bus, uint8_t addr, const char *src, NLinkProgressCb cb, void *user,
+                  NLinkString *out_err);
 int nlink_cli_run(void);
 
 #ifdef __cplusplus

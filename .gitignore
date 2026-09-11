@@ -1,5 +1,6 @@
 .DS_Store
 Notes.md
+testing/
 nlink/target
 qt/build
 dist/*.AppImage

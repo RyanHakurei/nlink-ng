@@ -72,6 +72,17 @@ fn fill_empty(p: *mut NLinkString) {
   }
 }
 
+fn info_json(info: &libnspire::info::Info, bus: u8, addr: u8) -> std::result::Result<String, serde_json::Error> {
+  let mut json = serde_json::to_string(info)?;
+  if let Some(ver) = device::detect_ndless(bus, addr) {
+    if let Ok(serde_json::Value::Object(mut obj)) = serde_json::from_str::<serde_json::Value>(&json) {
+      obj.insert("ndless".to_string(), serde_json::Value::String(ver));
+      json = serde_json::Value::Object(obj).to_string();
+    }
+  }
+  Ok(json)
+}
+
 pub type NLinkProgressCb = Option<extern "C" fn(*mut c_void, u64, u64)>;
 
 fn progress_fn(cb: NLinkProgressCb, user: *mut c_void) -> impl FnMut(usize) {
@@ -113,7 +124,7 @@ pub extern "C" fn nlink_open(
   fill_empty(out_json);
   fill_empty(out_err);
   match device::open(bus, addr) {
-    Ok(info) => match serde_json::to_string(&info) {
+    Ok(info) => match info_json(&info, bus, addr) {
       Ok(json) => {
         fill_ok(out_json, &json);
         0
@@ -143,7 +154,7 @@ pub extern "C" fn nlink_info(
   fill_empty(out_json);
   fill_empty(out_err);
   match device::info(bus, addr) {
-    Ok(info) => match serde_json::to_string(&info) {
+    Ok(info) => match info_json(&info, bus, addr) {
       Ok(json) => {
         fill_ok(out_json, &json);
         0
@@ -375,6 +386,48 @@ pub extern "C" fn nlink_upload_os(
   };
   let mut progress = progress_fn(cb, user);
   match device::upload_os(bus, addr, &src, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_backup(
+  bus: u8,
+  addr: u8,
+  dest: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let dest = match cstr(dest) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  match device::backup(bus, addr, &dest, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_restore(
+  bus: u8,
+  addr: u8,
+  src: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let src = match cstr(src) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  match device::restore(bus, addr, &src, &mut progress) {
     Ok(()) => 0,
     Err(e) => fill_err(out_err, e),
   }
