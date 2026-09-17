@@ -7,8 +7,9 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 use libnspire_sys::{
-  nspire_device_info, nspire_devinfo, nspire_dir_create, nspire_dir_delete, nspire_dir_info,
-  nspire_dir_type_NSPIRE_DIR, nspire_dirlist, nspire_dirlist_free, nspire_file_copy,
+  nspire_attr, nspire_device_info, nspire_devinfo, nspire_dir_create, nspire_dir_delete,
+  nspire_dir_info, nspire_dir_item, nspire_dir_type_NSPIRE_DIR, nspire_dirlist, nspire_dirlist_free,
+  nspire_file_copy,
   nspire_file_delete, nspire_file_move, nspire_file_read, nspire_file_write, nspire_free,
   nspire_handle_t, nspire_image, nspire_init, nspire_os_send, nspire_screenshot, nspire_strerror,
 };
@@ -51,17 +52,26 @@ extern "C" {
   fn nspire_android_setup(fd: c_int, ep_in: u8, ep_out: u8) -> c_int;
 }
 
+unsafe extern "C" fn report_progress(remaining: usize, _: *mut c_void) {
+  crate::progress::set_remaining(remaining as u64);
+}
+
 fn nsp_err(rc: c_int) -> Result<()> {
   if rc == 0 {
     Ok(())
   } else {
-    let msg = unsafe {
+    let raw = unsafe {
       let p = nspire_strerror(rc);
       if p.is_null() {
         format!("libnspire error {rc}")
       } else {
         CStr::from_ptr(p).to_string_lossy().into_owned()
       }
+    };
+    let msg = if raw.eq_ignore_ascii_case("busy") {
+      "Calculator is busy (often after a failed transfer). Unplug it, wait a few seconds, plug it back in, then connect again.".to_string()
+    } else {
+      raw
     };
     Err(NlinkError(msg))
   }
@@ -84,9 +94,27 @@ pub fn open(_bus: u8, _addr: u8) -> Result<serde_json::Value> {
 }
 
 pub fn open_android(fd: i32, ep_in: u8, ep_out: u8, is_cx2: bool) -> Result<serde_json::Value> {
+  if let Some(old) = session().lock().unwrap().take() {
+    unsafe { nspire_free(old.handle) };
+  }
   nsp_err(unsafe { nspire_android_setup(fd, ep_in, ep_out) })?;
   let mut handle: *mut nspire_handle_t = ptr::null_mut();
-  nsp_err(unsafe { nspire_init(&mut handle, ptr::null_mut(), is_cx2) })?;
+  let mut last = NlinkError::from("Failed to open calculator");
+  for attempt in 0..5 {
+    if attempt > 0 {
+      std::thread::sleep(std::time::Duration::from_millis(700 * attempt as u64));
+    }
+    match nsp_err(unsafe { nspire_init(&mut handle, ptr::null_mut(), is_cx2) }) {
+      Ok(()) => break,
+      Err(e) => {
+        last = e;
+        handle = ptr::null_mut();
+        if attempt == 4 {
+          return Err(last);
+        }
+      }
+    }
+  }
   let mut info: nspire_devinfo = unsafe { std::mem::zeroed() };
   if let Err(e) = nsp_err(unsafe { nspire_device_info(handle, &mut info) }) {
     unsafe { nspire_free(handle) };
@@ -178,9 +206,23 @@ pub fn download_file(
     return Err(format!("File is {size} bytes, which exceeds the safety limit.").into());
   }
   let cpath = CString::new(remote)?;
-  let len = usize::try_from(size).map_err(|_| NlinkError::from("too large"))?;
+  let listed = usize::try_from(size).map_err(|_| NlinkError::from("too large"))?;
   with_handle(|h| {
-    let mut buf = vec![0u8; len.max(1)];
+    let mut known = listed;
+    let mut item: nspire_dir_item = unsafe { std::mem::zeroed() };
+    if nsp_err(unsafe { nspire_attr(h, cpath.as_ptr(), &mut item) }).is_ok() {
+      known = known.max(item.size as usize);
+    }
+    // Pad so a slightly-wrong listing size cannot truncate the USB session.
+    let mut len = known.saturating_add(256 * 1024);
+    if known == 0 {
+      len = len.max(1024 * 1024);
+    }
+    if len as u64 > MAX_FILE_SIZE {
+      len = MAX_FILE_SIZE as usize;
+    }
+    crate::progress::reset(known as u64);
+    let mut buf = vec![0u8; len];
     let mut read = 0usize;
     nsp_err(unsafe {
       nspire_file_read(
@@ -189,14 +231,17 @@ pub fn download_file(
         buf.as_mut_ptr() as _,
         buf.len(),
         &mut read,
-        None,
+        Some(report_progress),
         ptr::null_mut(),
       )
     })?;
+    crate::progress::finish();
     std::fs::create_dir_all(dest_dir)?;
-    if let Some(name) = remote.split('/').last() {
-      File::create(dest_dir.join(name))?.write_all(&buf[..read])?;
-    }
+    let name = remote
+      .rsplit('/')
+      .find(|s| !s.is_empty())
+      .ok_or_else(|| NlinkError::from("invalid remote path"))?;
+    File::create(dest_dir.join(name))?.write_all(&buf[..read])?;
     progress(0);
     Ok(())
   })
@@ -245,6 +290,7 @@ pub fn upload_file(
     .to_string_lossy();
   let remote = format!("{}/{}", dest_dir.trim_end_matches('/'), name);
   let cpath = CString::new(remote)?;
+  crate::progress::reset(buf.len() as u64);
   with_handle(|h| {
     nsp_err(unsafe {
       nspire_file_write(
@@ -252,10 +298,11 @@ pub fn upload_file(
         cpath.as_ptr(),
         buf.as_ptr() as *mut c_void,
         buf.len(),
-        None,
+        Some(report_progress),
         ptr::null_mut(),
       )
     })?;
+    crate::progress::finish();
     progress(0);
     Ok(())
   })
@@ -296,16 +343,18 @@ pub fn upload_os(
 ) -> Result<()> {
   let mut buf = vec![];
   File::open(src)?.read_to_end(&mut buf)?;
+  crate::progress::reset(buf.len() as u64);
   with_handle(|h| {
     nsp_err(unsafe {
       nspire_os_send(
         h,
         buf.as_mut_ptr() as *mut c_void,
         buf.len(),
-        None,
+        Some(report_progress),
         ptr::null_mut(),
       )
     })?;
+    crate::progress::finish();
     progress(0);
     Ok(())
   })
@@ -410,7 +459,7 @@ pub fn exit_exam_mode(_bus: u8, _addr: u8) -> Result<()> {
         cpath.as_ptr(),
         EXIT_TEST_MODE_TNS.as_ptr() as *mut c_void,
         EXIT_TEST_MODE_TNS.len(),
-        None,
+        Some(report_progress),
         ptr::null_mut(),
       )
     };

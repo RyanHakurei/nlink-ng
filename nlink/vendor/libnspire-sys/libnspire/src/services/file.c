@@ -61,7 +61,8 @@ int nspire_file_write(nspire_handle_t *handle, const char *path,
 		size -= len;
 		ptr += len;
 
-		cb(size, cb_data);
+		if (cb)
+			cb(size, cb_data);
 	}
 
 	if ( (ret = data_read(handle, buffer, sizeof(buffer), NULL)) )
@@ -113,24 +114,37 @@ int nspire_file_read(nspire_handle_t *handle, const char *path,
 
 	size_t maxsize = packet_max_datasize(handle) - 1;
 
+	/* Remaining file bytes, not remaining buffer — progress and the USB
+	 * session both depend on draining the whole file, then ACKing. */
+	if (cb)
+		cb(data_len, cb_data);
+
 	while (data_len) {
 		len = (maxsize < data_len) ? maxsize : data_len;
 
 		if ( (ret = data_read(handle, buffer, len+1, &len)) )
 			goto end;
 
-		size_t to_copy = len - 1;
-		memcpy(ptr, buffer + 1, (size < to_copy) ? size : to_copy);
-		if (total_bytes) *total_bytes += (size < to_copy) ? size : to_copy;
-		size -= (size < to_copy) ? size : to_copy;
-		if(!size) {
+		if (len < 1) {
+			ret = -NSPIRE_ERR_INVALPKT;
 			goto end;
 		}
 
-		ptr += to_copy;
+		size_t payload = len - 1;
+		if (payload > data_len)
+			payload = data_len;
 
-		data_len -= len - 1;
-		cb(size, cb_data);
+		if (size && data) {
+			size_t copy = (size < payload) ? size : payload;
+			memcpy(ptr, buffer + 1, copy);
+			if (total_bytes) *total_bytes += copy;
+			size -= copy;
+			ptr += copy;
+		}
+
+		data_len -= (uint32_t)payload;
+		if (cb)
+			cb(data_len, cb_data);
 	}
 
 	if ( (ret = data_write16(handle, 0xFF00)) )

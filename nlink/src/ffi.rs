@@ -92,10 +92,22 @@ fn progress_fn(cb: NLinkProgressCb, user: *mut c_void) -> impl FnMut(usize) {
     if last_total < remaining {
       last_total = remaining;
     }
-    let total = last_total.max(remaining);
+    let total = last_total.max(remaining) as u64;
+    crate::progress::update(remaining as u64, total);
     if let Some(cb) = cb {
-      cb(user, remaining as u64, total as u64);
+      cb(user, remaining as u64, total);
     }
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_progress_get(out_done: *mut u64, out_total: *mut u64) {
+  let (done, total) = crate::progress::get();
+  if !out_done.is_null() {
+    unsafe { *out_done = done };
+  }
+  if !out_total.is_null() {
+    unsafe { *out_total = total };
   }
 }
 

@@ -161,7 +161,12 @@ static bool readPacket(usb_device_t *usb, NNSEMessage *message, int maxlen)
 
 	int transferred = 0;
 	memset(message, 0, sizeof(NNSEMessage));
-	int r = usb_bulk(usb, usb->ep_in, reinterpret_cast<unsigned char*>(message), maxlen, &transferred, 60000);
+#ifdef __ANDROID__
+	const unsigned int first_read_timeout = 4000;
+#else
+	const unsigned int first_read_timeout = 60000;
+#endif
+	int r = usb_bulk(usb, usb->ep_in, reinterpret_cast<unsigned char*>(message), maxlen, &transferred, first_read_timeout);
 
 	if(r < 0
 		|| transferred < sizeof(NNSEMessage))

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:dynamic_color/dynamic_color.dart';
@@ -7,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'nlink.dart';
+import 'nlink_worker.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -90,9 +92,9 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static const _usb = MethodChannel('nlink/usb');
-  Nlink? _nlink;
+  NlinkWorker? _nlink;
   List<UsbDeviceInfo> _devices = [];
   Map<String, dynamic>? _info;
   String _path = '/';
@@ -100,16 +102,41 @@ class _HomePageState extends State<HomePage> {
   String _status = 'Connect a TI-Nspire over USB-OTG.';
   bool _busy = false;
   bool _connected = false;
+  double? _transferProgress;
+  Timer? _progressTimer;
+  Nlink? _progressLib;
 
   @override
   void initState() {
     super.initState();
-    try {
-      _nlink = Nlink.load();
-    } catch (e) {
-      _status = 'Native library missing: $e';
+    WidgetsBinding.instance.addObserver(this);
+    _usb.setMethodCallHandler((call) async {
+      if (call.method == 'usbDetached' && _connected) {
+        await _disconnect(userMessage: 'Calculator disconnected.');
+      }
+    });
+    () async {
+      try {
+        _nlink = await NlinkWorker.spawn();
+      } catch (e) {
+        if (mounted) setState(() => _status = 'Native library missing: $e');
+      }
+      await _scan();
+    }();
+  }
+
+  @override
+  void dispose() {
+    _progressTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _connected && !_busy) {
+      _reload();
     }
-    _scan();
   }
 
   Future<void> _scan() async {
@@ -154,46 +181,60 @@ class _HomePageState extends State<HomePage> {
       _busy = true;
       _status = 'Opening calculator…';
     });
-    try {
-      final raw = await _usb.invokeMethod<Map<dynamic, dynamic>>('open', {
-        'deviceId': d.deviceId,
-      });
-      if (raw == null) throw Exception('open returned null');
-      final json = _nlink!.openAndroid(
-        fd: raw['fd'] as int,
-        epIn: raw['epIn'] as int,
-        epOut: raw['epOut'] as int,
-        isCx2: raw['isCx2'] as bool? ?? true,
-      );
-      setState(() {
-        _connected = true;
-        _info = jsonDecode(json) as Map<String, dynamic>;
-        _path = '/';
-      });
-      await _reload();
-    } catch (e) {
-      setState(() => _status = 'Connect failed: $e');
+    Object? lastError;
+    for (var attempt = 1; attempt <= 4; attempt++) {
       try {
-        await _usb.invokeMethod('close');
-      } catch (_) {}
-    } finally {
-      setState(() => _busy = false);
+        if (attempt > 1) {
+          setState(() => _status = 'Opening calculator… (try $attempt/4)');
+          await Future<void>.delayed(Duration(milliseconds: 350 * attempt));
+        }
+        final raw = await _usb.invokeMethod<Map<dynamic, dynamic>>('open', {
+          'deviceId': d.deviceId,
+        });
+        if (raw == null) throw Exception('open returned null');
+        final json = await _nlink!.openAndroid(
+          fd: raw['fd'] as int,
+          epIn: raw['epIn'] as int,
+          epOut: raw['epOut'] as int,
+          isCx2: raw['isCx2'] as bool? ?? true,
+        );
+        if (!mounted) return;
+        setState(() {
+          _connected = true;
+          _info = jsonDecode(json) as Map<String, dynamic>;
+          _path = '/';
+        });
+        await _reload();
+        return;
+      } catch (e) {
+        lastError = e;
+        try {
+          await _nlink?.close();
+        } catch (_) {}
+        try {
+          await _usb.invokeMethod('close');
+        } catch (_) {}
+      }
     }
+    if (mounted) setState(() => _status = 'Connect failed: $lastError');
+    setState(() => _busy = false);
   }
 
-  Future<void> _disconnect() async {
+  Future<void> _disconnect({String userMessage = 'Disconnected.'}) async {
     try {
-      _nlink?.close();
+      await _nlink?.close();
     } catch (_) {}
     try {
       await _usb.invokeMethod('close');
     } catch (_) {}
+    if (!mounted) return;
     setState(() {
       _connected = false;
       _files = [];
       _info = null;
       _path = '/';
-      _status = 'Disconnected.';
+      _status = userMessage;
+      _busy = false;
     });
     await _scan();
   }
@@ -207,7 +248,7 @@ class _HomePageState extends State<HomePage> {
     if (_nlink == null || !_connected) return;
     setState(() => _busy = true);
     try {
-      final raw = _nlink!.listDir(_path);
+      final raw = await _nlink!.listDir(_path);
       final list = (jsonDecode(raw) as List<dynamic>)
           .map((e) {
             final m = e as Map<String, dynamic>;
@@ -254,11 +295,50 @@ class _HomePageState extends State<HomePage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  String _fmtBytes(int n) {
+    if (n < 1024) return '$n B';
+    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+    return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  Future<T> _withTransfer<T>(String label, Future<T> Function() op) async {
+    _progressLib ??= Nlink.load();
+    _progressTimer?.cancel();
+    setState(() {
+      _busy = true;
+      _transferProgress = 0;
+      _status = label;
+    });
+    _progressTimer = Timer.periodic(const Duration(milliseconds: 120), (_) {
+      final p = _progressLib!.progressGet();
+      if (!mounted) return;
+      setState(() {
+        if (p.total > 0) {
+          _transferProgress = (p.done / p.total).clamp(0.0, 1.0);
+          final pct = ((_transferProgress ?? 0) * 100).round();
+          _status = '$label  ·  ${_fmtBytes(p.done)} / ${_fmtBytes(p.total)}  ($pct%)';
+        }
+      });
+    });
+    try {
+      return await op();
+    } finally {
+      _progressTimer?.cancel();
+      _progressTimer = null;
+      if (mounted) {
+        setState(() {
+          _transferProgress = null;
+          _busy = false;
+        });
+      }
+    }
+  }
+
   Future<void> _mkdir() async {
     final name = await _prompt('New folder', 'Name');
     if (name == null || name.isEmpty) return;
     try {
-      _nlink!.mkdir(_join(_path, name));
+      await _nlink!.mkdir(_join(_path, name));
       await _reload();
     } catch (e) {
       _snack('$e');
@@ -270,34 +350,60 @@ class _HomePageState extends State<HomePage> {
       final raw = await _usb.invokeMethod<List<dynamic>>('pickFiles');
       final paths = (raw ?? []).whereType<String>().toList();
       if (paths.isEmpty) return;
-      setState(() => _busy = true);
-      for (final path in paths) {
-        _nlink!.uploadFile(_path, path);
+      for (var i = 0; i < paths.length; i++) {
+        final path = paths[i];
+        final name = path.split('/').last;
+        final label = paths.length == 1
+            ? 'Uploading $name'
+            : 'Uploading $name (${i + 1}/${paths.length})';
+        await _withTransfer(label, () => _nlink!.uploadFile(_path, path));
       }
       await _reload();
-      _snack('Upload complete');
+      _snack(paths.length == 1 ? 'Upload complete' : 'Uploaded ${paths.length} files');
     } catch (e) {
       _snack('$e');
-    } finally {
-      setState(() => _busy = false);
+      if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<void> _download(CalcFile f) async {
-    setState(() => _busy = true);
+    final remote = _join(_path, f.name);
+    final cacheRoot = await _usb.invokeMethod<String>('cacheDir');
+    if (cacheRoot == null || cacheRoot.isEmpty) {
+      _snack('No cache directory');
+      return;
+    }
+    final dest = '$cacheRoot/dl_${DateTime.now().millisecondsSinceEpoch}';
     try {
-      final dir = await _usb.invokeMethod<String>('downloadDir') ?? '/data/local/tmp';
-      final remote = _join(_path, f.name);
       if (f.isDir) {
-        _nlink!.downloadDir(remote, '$dir/${f.name}');
+        final tree = await _usb.invokeMethod<String>('pickSaveTree');
+        if (tree == null || tree.isEmpty) return;
+        await _withTransfer('Downloading ${f.name}', () async {
+          await _nlink!.downloadDir(remote, dest);
+          await _usb.invokeMethod('copyDirToTree', {
+            'src': dest,
+            'uri': tree,
+            'name': f.name,
+          });
+        });
+        _snack('Saved folder ${f.name}');
+        await _reload();
       } else {
-        _nlink!.downloadFile(remote, f.size, dir);
+        final uri = await _usb.invokeMethod<String>('pickSaveFile', {'name': f.name});
+        if (uri == null || uri.isEmpty) return;
+        await _withTransfer('Downloading ${f.name}', () async {
+          await _nlink!.downloadFile(remote, f.size, dest);
+          await _usb.invokeMethod('copyToUri', {
+            'src': '$dest/${f.name}',
+            'uri': uri,
+          });
+        });
+        _snack('Saved ${f.name}');
+        await _reload();
       }
-      _snack('Saved to $dir');
     } catch (e) {
       _snack('$e');
-    } finally {
-      setState(() => _busy = false);
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -305,7 +411,7 @@ class _HomePageState extends State<HomePage> {
     final name = await _prompt('Rename', 'New name', f.name);
     if (name == null || name.isEmpty || name == f.name) return;
     try {
-      _nlink!.move(_join(_path, f.name), _join(_path, name));
+      await _nlink!.move(_join(_path, f.name), _join(_path, name));
       await _reload();
     } catch (e) {
       _snack('$e');
@@ -328,9 +434,9 @@ class _HomePageState extends State<HomePage> {
     try {
       final p = _join(_path, f.name);
       if (f.isDir) {
-        _nlink!.rmdir(p);
+        await _nlink!.rmdir(p);
       } else {
-        _nlink!.rm(p);
+        await _nlink!.rm(p);
       }
       await _reload();
     } catch (e) {
@@ -341,8 +447,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _screenshot() async {
     setState(() => _busy = true);
     try {
-      final shot = _nlink!.screenshot();
-      final bytes = Uint8List.fromList(shot.rgba);
+      final shot = await _nlink!.screenshot();
+      final bytes = shot.rgba;
       final image = await _decodeRgba(bytes, shot.width, shot.height);
       if (!mounted) return;
       await showDialog<void>(
@@ -385,7 +491,7 @@ class _HomePageState extends State<HomePage> {
     );
     if (ok != true) return;
     try {
-      _nlink!.exitExam();
+      await _nlink!.exitExam();
       _snack('Exam-mode exit sent.');
       await _disconnect();
     } catch (e) {
@@ -464,7 +570,7 @@ class _HomePageState extends State<HomePage> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_busy) const LinearProgressIndicator(),
+          if (_busy) LinearProgressIndicator(value: _transferProgress),
           Padding(
             padding: const EdgeInsets.all(16),
             child: Text(_status),

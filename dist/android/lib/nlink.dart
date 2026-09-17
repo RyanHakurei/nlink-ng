@@ -166,6 +166,9 @@ typedef _ShotDart = int Function(
   Pointer<NLinkString> err,
 );
 
+typedef _ProgressGetNative = Void Function(Pointer<Uint64> done, Pointer<Uint64> total);
+typedef _ProgressGetDart = void Function(Pointer<Uint64> done, Pointer<Uint64> total);
+
 class Nlink {
   Nlink._(DynamicLibrary lib)
       : _openAndroid = lib.lookupFunction<_OpenAndroidNative, _OpenAndroidDart>('nlink_open_android'),
@@ -181,6 +184,7 @@ class Nlink {
         _upload = lib.lookupFunction<_UlNative, _UlDart>('nlink_upload_file'),
         _screenshot = lib.lookupFunction<_ShotNative, _ShotDart>('nlink_screenshot'),
         _exitExam = lib.lookupFunction<_ErrFnNative, _ErrFnDart>('nlink_exit_exam_mode'),
+        _progressGet = lib.lookupFunction<_ProgressGetNative, _ProgressGetDart>('nlink_progress_get'),
         _freeString = lib.lookupFunction<Void Function(NLinkString), void Function(NLinkString)>(
           'nlink_string_free',
         ),
@@ -205,8 +209,21 @@ class Nlink {
   final _UlDart _upload;
   final _ShotDart _screenshot;
   final _ErrFnDart _exitExam;
+  final _ProgressGetDart _progressGet;
   final void Function(NLinkString) _freeString;
   final void Function(NLinkImage) _freeImage;
+
+  ({int done, int total}) progressGet() {
+    final done = calloc<Uint64>();
+    final total = calloc<Uint64>();
+    try {
+      _progressGet(done, total);
+      return (done: done.value, total: total.value);
+    } finally {
+      calloc.free(done);
+      calloc.free(total);
+    }
+  }
 
   String _take(Pointer<NLinkString> p) {
     final s = p.ref;

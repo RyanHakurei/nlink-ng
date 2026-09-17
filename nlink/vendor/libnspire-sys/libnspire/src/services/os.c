@@ -70,7 +70,8 @@ int nspire_os_send(nspire_handle_t *handle, void* data, size_t size, nspire_call
 
 		size -= len;
 		ptr += len;
-		cb(size, cb_data);
+		if (cb)
+			cb(size, cb_data);
 	}
 
 	while (1) {

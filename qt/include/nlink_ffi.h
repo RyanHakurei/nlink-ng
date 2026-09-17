@@ -15,6 +15,7 @@ typedef struct NLinkString {
 void nlink_string_free(NLinkString s);
 
 typedef void (*NLinkProgressCb)(void *user, uint64_t remaining, uint64_t total);
+void nlink_progress_get(uint64_t *out_done, uint64_t *out_total);
 
 int nlink_enumerate(NLinkString *out_json, NLinkString *out_err);
 int nlink_open(uint8_t bus, uint8_t addr, NLinkString *out_json, NLinkString *out_err);

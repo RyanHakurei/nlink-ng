@@ -69,11 +69,13 @@ int usb_bulk(usb_device_t *handle, unsigned char ep, void *ptr, int len,
 	b.len = (unsigned int)len;
 	b.timeout = timeout;
 	b.data = ptr;
-	r = ioctl(android_fd, USBDEVFS_BULK, &b);
+	do {
+		r = ioctl(android_fd, USBDEVFS_BULK, &b);
+	} while (r < 0 && errno == EINTR);
 	if (r < 0) {
 		if (errno == ETIMEDOUT)
 			return -NSPIRE_ERR_TIMEOUT;
-		if (errno == ENODEV || errno == ESHUTDOWN)
+		if (errno == ENODEV || errno == ESHUTDOWN || errno == EPIPE)
 			return -NSPIRE_ERR_NODEVICE;
 		return -NSPIRE_ERR_LIBUSB;
 	}
