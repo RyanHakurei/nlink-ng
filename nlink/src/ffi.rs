@@ -72,6 +72,7 @@ fn fill_empty(p: *mut NLinkString) {
   }
 }
 
+#[cfg(not(target_os = "android"))]
 fn info_json(info: &libnspire::info::Info, bus: u8, addr: u8) -> std::result::Result<String, serde_json::Error> {
   let mut json = serde_json::to_string(info)?;
   if let Some(ver) = device::detect_ndless(bus, addr) {
@@ -123,6 +124,12 @@ pub extern "C" fn nlink_open(
 ) -> c_int {
   fill_empty(out_json);
   fill_empty(out_err);
+  #[cfg(target_os = "android")]
+  {
+    let _ = (bus, addr);
+    return fill_err(out_err, "Use nlink_open_android on Android");
+  }
+  #[cfg(not(target_os = "android"))]
   match device::open(bus, addr) {
     Ok(info) => match info_json(&info, bus, addr) {
       Ok(json) => {
@@ -131,6 +138,32 @@ pub extern "C" fn nlink_open(
       }
       Err(e) => fill_err(out_err, e),
     },
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_open_android(
+  fd: i32,
+  ep_in: u8,
+  ep_out: u8,
+  is_cx2: u8,
+  out_json: *mut NLinkString,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_json);
+  fill_empty(out_err);
+  #[cfg(not(target_os = "android"))]
+  {
+    let _ = (fd, ep_in, ep_out, is_cx2);
+    return fill_err(out_err, "nlink_open_android is only available on Android");
+  }
+  #[cfg(target_os = "android")]
+  match device::open_android(fd, ep_in, ep_out, is_cx2 != 0) {
+    Ok(json) => {
+      fill_ok(out_json, &json.to_string());
+      0
+    }
     Err(e) => fill_err(out_err, e),
   }
 }
@@ -153,6 +186,15 @@ pub extern "C" fn nlink_info(
 ) -> c_int {
   fill_empty(out_json);
   fill_empty(out_err);
+  #[cfg(target_os = "android")]
+  match device::info(bus, addr) {
+    Ok(json) => {
+      fill_ok(out_json, &json.to_string());
+      0
+    }
+    Err(e) => fill_err(out_err, e),
+  }
+  #[cfg(not(target_os = "android"))]
   match device::info(bus, addr) {
     Ok(info) => match info_json(&info, bus, addr) {
       Ok(json) => {
@@ -433,8 +475,80 @@ pub extern "C" fn nlink_restore(
   }
 }
 
+#[repr(C)]
+pub struct NLinkImage {
+  pub rgba: *mut u8,
+  pub width: i32,
+  pub height: i32,
+  pub stride: i32,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nlink_image_free(img: NLinkImage) {
+  if img.rgba.is_null() || img.height <= 0 || img.stride <= 0 {
+    return;
+  }
+  let len = (img.stride as usize) * (img.height as usize);
+  drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(img.rgba, len)));
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_screenshot(
+  bus: u8,
+  addr: u8,
+  out: *mut NLinkImage,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  if !out.is_null() {
+    unsafe {
+      *out = NLinkImage {
+        rgba: ptr::null_mut(),
+        width: 0,
+        height: 0,
+        stride: 0,
+      };
+    }
+  }
+  match device::screenshot(bus, addr) {
+    Ok(shot) => {
+      if !out.is_null() {
+        let width = shot.width as i32;
+        let height = shot.height as i32;
+        let stride = width * 4;
+        let boxed = shot.rgba.into_boxed_slice();
+        let ptr_rgba = Box::into_raw(boxed).cast::<u8>();
+        unsafe {
+          *out = NLinkImage {
+            rgba: ptr_rgba,
+            width,
+            height,
+            stride,
+          };
+        }
+      }
+      0
+    }
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_exit_exam_mode(bus: u8, addr: u8, out_err: *mut NLinkString) -> c_int {
+  fill_empty(out_err);
+  match device::exit_exam_mode(bus, addr) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
 #[no_mangle]
 pub extern "C" fn nlink_cli_run() -> c_int {
+  #[cfg(target_os = "android")]
+  {
+    -1
+  }
+  #[cfg(not(target_os = "android"))]
   if crate::cli::run() {
     0
   } else {

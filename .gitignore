@@ -9,7 +9,13 @@ dist/arch/pkg/
 dist/arch/*.pkg.tar.*
 dist/arch/*.tar.gz
 dist/arch/*.log
+dist/android/.dart_tool/
+dist/android/build/
+dist/android/android/.gradle/
+dist/android/android/local.properties
+dist/android/android/app/build/
 *.tns
+!nlink/src/exit_test_mode.tns
 
 .env.local
 .env.*.local

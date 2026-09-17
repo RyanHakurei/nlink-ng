@@ -191,6 +191,74 @@ pub fn info(bus: u8, addr: u8) -> Result<libnspire::info::Info> {
   with_handle(bus, addr, |h| Ok(h.info()?))
 }
 
+pub struct Screenshot {
+  pub width: u16,
+  pub height: u16,
+  pub rgba: Vec<u8>,
+}
+
+fn rgb565le_to_rgba(data: &[u8], pixels: usize) -> Vec<u8> {
+  let mut out = Vec::with_capacity(pixels * 4);
+  for chunk in data.chunks_exact(2).take(pixels) {
+    let c = u16::from_le_bytes([chunk[0], chunk[1]]);
+    let r5 = (c >> 11) & 0x1f;
+    let g6 = (c >> 5) & 0x3f;
+    let b5 = c & 0x1f;
+    let r = ((r5 << 3) | (r5 >> 2)) as u8;
+    let g = ((g6 << 2) | (g6 >> 4)) as u8;
+    let b = ((b5 << 3) | (b5 >> 2)) as u8;
+    out.extend_from_slice(&[r, g, b, 255]);
+  }
+  out
+}
+
+fn gray8_to_rgba(data: &[u8], pixels: usize) -> Vec<u8> {
+  let mut out = Vec::with_capacity(pixels * 4);
+  for &v in data.iter().take(pixels) {
+    out.extend_from_slice(&[v, v, v, 255]);
+  }
+  out
+}
+
+pub fn screenshot(bus: u8, addr: u8) -> Result<Screenshot> {
+  with_handle(bus, addr, |h| {
+    let img = h.screenshot()?;
+    let pixels = img.width as usize * img.height as usize;
+    let rgba = match img.bpp {
+      16 => rgb565le_to_rgba(&img.data, pixels),
+      8 => gray8_to_rgba(&img.data, pixels),
+      other => {
+        return Err(NlinkError::from(format!(
+          "Unsupported screenshot depth: {other} bpp"
+        )))
+      }
+    };
+    if rgba.len() != pixels * 4 {
+      return Err(NlinkError::from("Screenshot data was truncated"));
+    }
+    Ok(Screenshot {
+      width: img.width,
+      height: img.height,
+      rgba,
+    })
+  })
+}
+
+pub fn screenshot_png(bus: u8, addr: u8, dest: &Path) -> Result<()> {
+  let shot = screenshot(bus, addr)?;
+  let file = File::create(dest)?;
+  let mut encoder = png::Encoder::new(file, shot.width as u32, shot.height as u32);
+  encoder.set_color(png::ColorType::Rgba);
+  encoder.set_depth(png::BitDepth::Eight);
+  let mut writer = encoder
+    .write_header()
+    .map_err(|e| NlinkError::from(e.to_string()))?;
+  writer
+    .write_image_data(&shot.rgba)
+    .map_err(|e| NlinkError::from(e.to_string()))?;
+  Ok(())
+}
+
 const ZEHN_SIGNATURE: u32 = 0x6e68_655a; // "Zehn"
 const ZEHN_FLAG_EXECUTABLE_VERSION: u8 = 10;
 
@@ -383,6 +451,31 @@ pub fn upload_file(
   with_handle(bus, addr, move |h| {
     h.write_file(&remote, &buf, progress)?;
     Ok(())
+  })
+}
+
+const EXIT_TEST_MODE_TNS: &[u8] = include_bytes!("exit_test_mode.tns");
+const EXIT_TEST_MODE_PATH: &str = "/Press-to-Test/Exit Test Mode.tns";
+
+/// Upload TI's "Exit Test Mode.tns" into Press-to-Test. The handheld reboots
+/// out of exam/Press-to-Test if that folder is present.
+pub fn exit_exam_mode(bus: u8, addr: u8) -> Result<()> {
+  with_handle(bus, addr, |h| {
+    let dir = h.list_dir("/")?;
+    let in_exam = dir.iter().any(|file| {
+      file.entry_type() == EntryType::Directory
+        && file.name().to_string_lossy() == "Press-to-Test"
+    });
+    if !in_exam {
+      return Err(NlinkError::from(
+        "Calculator does not appear to be in exam mode (no Press-to-Test folder).",
+      ));
+    }
+    match h.write_file(EXIT_TEST_MODE_PATH, EXIT_TEST_MODE_TNS, &mut |_| {}) {
+      Ok(()) => Ok(()),
+      Err(libnspire::Error::NoDevice) => Ok(()),
+      Err(e) => Err(e.into()),
+    }
   })
 }
 

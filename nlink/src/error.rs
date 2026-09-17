@@ -45,18 +45,26 @@ impl From<anyhow::Error> for NlinkError {
   }
 }
 
+impl From<std::ffi::NulError> for NlinkError {
+  fn from(_: std::ffi::NulError) -> Self {
+    NlinkError("invalid path".to_string())
+  }
+}
+
 impl From<std::io::Error> for NlinkError {
   fn from(value: std::io::Error) -> Self {
     NlinkError(value.to_string())
   }
 }
 
+#[cfg(not(target_os = "android"))]
 impl From<rusb::Error> for NlinkError {
   fn from(value: rusb::Error) -> Self {
     NlinkError(value.to_string())
   }
 }
 
+#[cfg(not(target_os = "android"))]
 impl From<libnspire::Error> for NlinkError {
   fn from(error: libnspire::Error) -> Self {
     let message = match error {

@@ -31,6 +31,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QImage>
 #include <QInputDialog>
 #include <QItemSelectionModel>
 #include <QJsonArray>
@@ -43,6 +44,8 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMimeDatabase>
+#include <QPalette>
+#include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSplitter>
@@ -52,6 +55,7 @@
 #include <QStyle>
 #include <QTableView>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -313,6 +317,25 @@ constexpr int kPathRole = Qt::UserRole;
 constexpr int kDirRole = Qt::UserRole + 1;
 constexpr int kSizeRole = Qt::UserRole + 2;
 
+void applyTranslucentBackground(QWidget *w) {
+  if (!w)
+    return;
+  w->setAutoFillBackground(false);
+  w->setAttribute(Qt::WA_TranslucentBackground, true);
+  w->setAttribute(Qt::WA_NoSystemBackground, true);
+  w->setAttribute(Qt::WA_StyledBackground, false);
+  QPalette pal = w->palette();
+  pal.setColor(QPalette::Base, Qt::transparent);
+  pal.setColor(QPalette::Window, Qt::transparent);
+  pal.setColor(QPalette::Button, Qt::transparent);
+  QColor alt = pal.color(QPalette::AlternateBase);
+  if (alt.alpha() > 80) {
+    alt.setAlpha(40);
+    pal.setColor(QPalette::AlternateBase, alt);
+  }
+  w->setPalette(pal);
+}
+
 const QString kNlinkMime = QStringLiteral("application/x-nlink-items");
 
 QByteArray encodeNlinkItems(const QVector<CalcFile> &files, bool cut, int bus, int addr) {
@@ -510,14 +533,17 @@ void MainWindow::buildUi() {
   m_osButton = new QPushButton("Upload OS");
   m_backup = new QPushButton("Backup");
   m_restore = new QPushButton("Restore");
+  m_screenshot = new QPushButton("Screenshot");
+  m_exitExam = new QPushButton("Exit exam mode");
   leftLay->addWidget(m_osButton);
   leftLay->addWidget(m_backup);
   leftLay->addWidget(m_restore);
+  leftLay->addWidget(m_screenshot);
+  leftLay->addWidget(m_exitExam);
   leftLay->addStretch();
 
   auto *right = new QWidget;
-  right->setAutoFillBackground(false);
-  right->setAttribute(Qt::WA_StyledBackground, false);
+  applyTranslucentBackground(right);
   auto *rightLay = new QVBoxLayout(right);
   m_navigator = new PathNavigator;
 
@@ -586,6 +612,7 @@ void MainWindow::buildUi() {
   m_detailsView->setColumnWidth(0, 280);
   m_detailsView->setColumnWidth(1, 120);
   m_detailsView->setColumnWidth(2, 160);
+  applyTranslucentBackground(m_detailsView->horizontalHeader());
 
   auto *icons = new FileIconView(this);
   m_iconsView = icons;
@@ -609,6 +636,7 @@ void MainWindow::buildUi() {
   setupFileView(m_iconsView);
 
   m_stack = new QStackedWidget;
+  applyTranslucentBackground(m_stack);
   m_stack->addWidget(m_detailsView);
   m_stack->addWidget(m_iconsView);
   rightLay->addWidget(m_stack, 1);
@@ -644,6 +672,8 @@ void MainWindow::buildUi() {
   connect(m_osButton, &QPushButton::clicked, this, &MainWindow::uploadOs);
   connect(m_backup, &QPushButton::clicked, this, &MainWindow::backupCalculator);
   connect(m_restore, &QPushButton::clicked, this, &MainWindow::restoreCalculator);
+  connect(m_screenshot, &QPushButton::clicked, this, &MainWindow::screenshotCalculator);
+  connect(m_exitExam, &QPushButton::clicked, this, &MainWindow::exitExamMode);
   connect(aboutBtn, &QToolButton::clicked, this, &MainWindow::showAbout);
 
   m_openAct = makeAction(QStringLiteral("Open"), QStringLiteral("document-open"),
@@ -742,6 +772,9 @@ void MainWindow::setupFileView(QAbstractItemView *view) {
   view->setDefaultDropAction(Qt::MoveAction);
   view->setDragDropOverwriteMode(true);
   view->setContextMenuPolicy(Qt::DefaultContextMenu);
+  view->setFrameShape(QFrame::NoFrame);
+  applyTranslucentBackground(view);
+  applyTranslucentBackground(view->viewport());
 }
 
 void MainWindow::setBusy(bool busy) {
@@ -753,6 +786,8 @@ void MainWindow::setBusy(bool busy) {
   m_osButton->setEnabled(on);
   m_backup->setEnabled(on);
   m_restore->setEnabled(on);
+  m_screenshot->setEnabled(on);
+  m_exitExam->setEnabled(on);
   m_devices->setEnabled(!busy);
   updateActions();
 }
@@ -1626,6 +1661,117 @@ void MainWindow::uploadOs() {
     const int rc = nlink_upload_os(static_cast<uint8_t>(bus), static_cast<uint8_t>(addr),
                                    src.toUtf8().constData(), nlinkProgressThunk,
                                    const_cast<MainWindow *>(this), &err);
+    if (rc != 0)
+      return takeString(err);
+    takeString(err);
+    return QString();
+  }));
+}
+
+void MainWindow::screenshotCalculator() {
+  if (!hasDevice())
+    return;
+  setBusy(true);
+  m_status->setText("Capturing screenshot…");
+  const int bus = m_bus;
+  const int addr = m_addr;
+  auto *watcher = new QFutureWatcher<QPair<QImage, QString>>(this);
+  connect(watcher, &QFutureWatcher<QPair<QImage, QString>>::finished, this, [this, watcher] {
+    const auto result = watcher->result();
+    watcher->deleteLater();
+    setBusy(false);
+    hideTransferUi();
+    if (!result.second.isEmpty()) {
+      showError(result.second);
+      return;
+    }
+    if (result.first.isNull()) {
+      showError(QStringLiteral("Screenshot was empty"));
+      return;
+    }
+    m_status->setText("Screenshot captured");
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Screenshot"));
+    auto *lay = new QVBoxLayout(&dlg);
+    auto *preview = new QLabel;
+    QPixmap pix = QPixmap::fromImage(result.first);
+    if (pix.width() > 0 && pix.width() < 480)
+      pix = pix.scaled(pix.size() * 2, Qt::KeepAspectRatio, Qt::FastTransformation);
+    preview->setPixmap(pix);
+    preview->setAlignment(Qt::AlignCenter);
+    lay->addWidget(preview);
+
+    auto *buttons = new QDialogButtonBox;
+    auto *saveBtn = buttons->addButton(QStringLiteral("Save…"), QDialogButtonBox::ActionRole);
+    buttons->addButton(QDialogButtonBox::Close);
+    connect(saveBtn, &QPushButton::clicked, this, [this, image = result.first, &dlg] {
+      const QString suggested =
+          QStringLiteral("nlink-ng-screenshot-%1.png")
+              .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm")));
+      const QString path = QFileDialog::getSaveFileName(&dlg, "Save screenshot", suggested,
+                                                        "PNG image (*.png)");
+      if (path.isEmpty())
+        return;
+      if (!image.save(path, "PNG"))
+        showError(QStringLiteral("Failed to save screenshot"));
+      else
+        m_status->setText(QStringLiteral("Saved %1").arg(path));
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    lay->addWidget(buttons);
+    dlg.exec();
+  });
+  watcher->setFuture(QtConcurrent::run([bus, addr] {
+    NLinkImage img{};
+    NLinkString err{};
+    const int rc =
+        nlink_screenshot(static_cast<uint8_t>(bus), static_cast<uint8_t>(addr), &img, &err);
+    if (rc != 0)
+      return qMakePair(QImage(), takeString(err));
+    takeString(err);
+    if (img.rgba == nullptr || img.width <= 0 || img.height <= 0) {
+      nlink_image_free(img);
+      return qMakePair(QImage(), QStringLiteral("Screenshot was empty"));
+    }
+    const QImage view(img.rgba, img.width, img.height, img.stride, QImage::Format_RGBA8888);
+    const QImage copy = view.copy();
+    nlink_image_free(img);
+    return qMakePair(copy, QString());
+  }));
+}
+
+void MainWindow::exitExamMode() {
+  if (!hasDevice())
+    return;
+  const auto reply = QMessageBox::question(
+      this, "Exit exam mode",
+      "This uploads “Exit Test Mode.tns” into the calculator’s Press-to-Test folder.\n"
+      "If the handheld is in exam mode, it will restart and leave Press-to-Test.\n\n"
+      "Continue?");
+  if (reply != QMessageBox::Yes)
+    return;
+  setBusy(true);
+  m_status->setText("Exiting exam mode…");
+  const int bus = m_bus;
+  const int addr = m_addr;
+  auto *watcher = new QFutureWatcher<QString>(this);
+  connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
+    const QString err = watcher->result();
+    watcher->deleteLater();
+    setBusy(false);
+    hideTransferUi();
+    if (!err.isEmpty()) {
+      showError(err);
+      return;
+    }
+    m_status->setText("Exam-mode exit sent. The calculator should restart.");
+    QTimer::singleShot(1500, this, &MainWindow::refreshDevices);
+  });
+  watcher->setFuture(QtConcurrent::run([bus, addr] {
+    NLinkString err{};
+    const int rc =
+        nlink_exit_exam_mode(static_cast<uint8_t>(bus), static_cast<uint8_t>(addr), &err);
     if (rc != 0)
       return takeString(err);
     takeString(err);

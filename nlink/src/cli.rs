@@ -29,6 +29,10 @@ enum SubCommand {
   Backup(Backup),
   /// Restore files from a .tar.gz backup onto the calculator
   Restore(Restore),
+  /// Capture the calculator screen to a PNG
+  Screenshot(ScreenshotCmd),
+  /// Exit Press-to-Test / exam mode
+  ExitExam,
   /// View license information
   License,
 }
@@ -127,6 +131,14 @@ struct Backup {
 struct Restore {
   /// Path to the .tar.gz backup
   archive: PathBuf,
+}
+
+/// Capture the calculator screen to a PNG file
+#[derive(Parser, Debug)]
+struct ScreenshotCmd {
+  /// Destination PNG path
+  #[arg(default_value = "nspire-screenshot.png")]
+  dest: PathBuf,
 }
 
 fn open_mapped_device() -> Option<(u8, u8)> {
@@ -618,6 +630,25 @@ pub fn run() -> bool {
           match crate::device::restore(bus, addr, &archive, &mut |_| {}) {
             Ok(()) => println!("Restore {}: Ok", archive.display()),
             Err(error) => eprintln!("Restore failed: {}", error),
+          }
+        }
+      }
+      SubCommand::Screenshot(ScreenshotCmd { dest }) => {
+        if let Some((bus, addr)) = open_mapped_device() {
+          let dest = cwd().join(&dest);
+          match crate::device::screenshot_png(bus, addr, &dest) {
+            Ok(()) => println!("Screenshot {}: Ok", dest.display()),
+            Err(error) => eprintln!("Screenshot failed: {}", error),
+          }
+        }
+      }
+      SubCommand::ExitExam => {
+        if let Some((bus, addr)) = open_mapped_device() {
+          match crate::device::exit_exam_mode(bus, addr) {
+            Ok(()) => println!(
+              "Exam-mode exit sent. The calculator should restart out of Press-to-Test."
+            ),
+            Err(error) => eprintln!("Failed to exit exam mode: {}", error),
           }
         }
       }

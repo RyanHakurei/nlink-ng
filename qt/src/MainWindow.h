@@ -63,6 +63,8 @@ private slots:
   void uploadOs();
   void backupCalculator();
   void restoreCalculator();
+  void screenshotCalculator();
+  void exitExamMode();
   void showNavigatorSubdirs(const QString &path, const QPoint &globalPos);
   void showAbout();
   void openSelected();
@@ -115,6 +117,8 @@ private:
   QPushButton *m_osButton = nullptr;
   QPushButton *m_backup = nullptr;
   QPushButton *m_restore = nullptr;
+  QPushButton *m_screenshot = nullptr;
+  QPushButton *m_exitExam = nullptr;
   QProgressBar *m_transfer = nullptr;
   QLabel *m_queueLabel = nullptr;
   QLabel *m_status = nullptr;

@@ -18,6 +18,8 @@ typedef void (*NLinkProgressCb)(void *user, uint64_t remaining, uint64_t total);
 
 int nlink_enumerate(NLinkString *out_json, NLinkString *out_err);
 int nlink_open(uint8_t bus, uint8_t addr, NLinkString *out_json, NLinkString *out_err);
+int nlink_open_android(int32_t fd, uint8_t ep_in, uint8_t ep_out, uint8_t is_cx2,
+                       NLinkString *out_json, NLinkString *out_err);
 int nlink_close(uint8_t bus, uint8_t addr, NLinkString *out_err);
 int nlink_info(uint8_t bus, uint8_t addr, NLinkString *out_json, NLinkString *out_err);
 int nlink_list_dir(uint8_t bus, uint8_t addr, const char *path, NLinkString *out_json,
@@ -42,6 +44,17 @@ int nlink_backup(uint8_t bus, uint8_t addr, const char *dest, NLinkProgressCb cb
                  NLinkString *out_err);
 int nlink_restore(uint8_t bus, uint8_t addr, const char *src, NLinkProgressCb cb, void *user,
                   NLinkString *out_err);
+
+typedef struct NLinkImage {
+  uint8_t *rgba;
+  int width;
+  int height;
+  int stride;
+} NLinkImage;
+
+void nlink_image_free(NLinkImage img);
+int nlink_screenshot(uint8_t bus, uint8_t addr, NLinkImage *out, NLinkString *out_err);
+int nlink_exit_exam_mode(uint8_t bus, uint8_t addr, NLinkString *out_err);
 int nlink_cli_run(void);
 
 #ifdef __cplusplus

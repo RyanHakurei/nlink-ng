@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TI-Nspire (0451:e012) and CX II (0451:e022) -->
+    <usb-device vendor-id="1105" product-id="57362" />
+    <usb-device vendor-id="1105" product-id="57378" />
+</resources>
