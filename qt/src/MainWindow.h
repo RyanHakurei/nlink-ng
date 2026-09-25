@@ -122,7 +122,6 @@ private:
   QPushButton *m_restore = nullptr;
   QPushButton *m_screenshot = nullptr;
   QPushButton *m_liveView = nullptr;
-  QPushButton *m_liveViewBar = nullptr;
   QPushButton *m_exitExam = nullptr;
   QProgressBar *m_transfer = nullptr;
   QLabel *m_queueLabel = nullptr;

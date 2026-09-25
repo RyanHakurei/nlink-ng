@@ -818,7 +818,7 @@ class _LiveViewDialog extends StatefulWidget {
 
 class _LiveViewDialogState extends State<_LiveViewDialog> {
   ui.Image? _image;
-  String _status = 'Waiting for nlink-view on the calculator…';
+  String _status = 'Waiting for a frame…';
   bool _run = true;
 
   @override

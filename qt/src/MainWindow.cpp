@@ -589,13 +589,9 @@ void MainWindow::buildUi() {
                        QIcon::fromTheme(QStringLiteral("help-about"),
                                         style()->standardIcon(QStyle::SP_MessageBoxQuestion)))));
 
-  m_liveViewBar = new QPushButton(QStringLiteral("Live view"));
-  m_liveViewBar->setToolTip(m_liveView->toolTip());
-
   auto *crumbRow = new QHBoxLayout;
   crumbRow->setContentsMargins(0, 0, 0, 0);
   crumbRow->setSpacing(6);
-  crumbRow->addWidget(m_liveViewBar);
   crumbRow->addWidget(m_navigator, 1);
   crumbRow->addWidget(m_detailsBtn);
   crumbRow->addWidget(m_iconsBtn);
@@ -697,7 +693,6 @@ void MainWindow::buildUi() {
   connect(m_restore, &QPushButton::clicked, this, &MainWindow::restoreCalculator);
   connect(m_screenshot, &QPushButton::clicked, this, &MainWindow::screenshotCalculator);
   connect(m_liveView, &QPushButton::clicked, this, &MainWindow::liveView);
-  connect(m_liveViewBar, &QPushButton::clicked, this, &MainWindow::liveView);
   connect(m_exitExam, &QPushButton::clicked, this, &MainWindow::exitExamMode);
   connect(aboutBtn, &QToolButton::clicked, this, &MainWindow::showAbout);
 
@@ -815,7 +810,6 @@ void MainWindow::setBusy(bool busy) {
   m_restore->setEnabled(on && m_nspire);
   m_screenshot->setEnabled(on);
   m_liveView->setEnabled(on && m_nspire);
-  m_liveViewBar->setEnabled(on && m_nspire);
   m_exitExam->setEnabled(on && m_nspire);
   m_devices->setEnabled(!busy);
   updateActions();

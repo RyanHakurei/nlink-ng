@@ -289,51 +289,9 @@ pub fn screenshot_png(bus: u8, addr: u8, dest: &Path) -> Result<()> {
   Ok(())
 }
 
-const ZEHN_SIGNATURE: u32 = 0x6e68_655a; // "Zehn"
-const ZEHN_FLAG_EXECUTABLE_VERSION: u8 = 10;
-
-fn format_ndless_version(v: u32) -> String {
-  if (2000..=2099).contains(&v) {
-    format!("r{v}")
-  } else if (20..100).contains(&v) {
-    format!("{}.{}", v / 10, v % 10)
-  } else {
-    v.to_string()
-  }
-}
-
-fn zehn_executable_version(data: &[u8]) -> Option<u32> {
-  let limit = data.len().min(20 * 1024).saturating_sub(32);
-  let mut i = 0;
-  while i <= limit {
-    let sig = u32::from_le_bytes(data[i..i + 4].try_into().ok()?);
-    let ver = u32::from_le_bytes(data[i + 4..i + 8].try_into().ok()?);
-    if sig == ZEHN_SIGNATURE && ver == 1 {
-      let reloc_count = u32::from_le_bytes(data[i + 12..i + 16].try_into().ok()?) as usize;
-      let flag_count = u32::from_le_bytes(data[i + 16..i + 20].try_into().ok()?) as usize;
-      let flags_off = i.checked_add(32)?.checked_add(reloc_count.checked_mul(4)?)?;
-      let flags_end = flags_off.checked_add(flag_count.checked_mul(4)?)?;
-      if flags_end > data.len() {
-        return None;
-      }
-      for f in 0..flag_count {
-        let off = flags_off + f * 4;
-        let raw = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
-        let ftype = (raw & 0xff) as u8;
-        let fdata = raw >> 8;
-        if ftype == ZEHN_FLAG_EXECUTABLE_VERSION {
-          return Some(fdata);
-        }
-      }
-      return None;
-    }
-    i += 4;
-  }
-  None
-}
-
-/// Returns a display version such as `r2022` or `4.5` if Ndless resources are
-/// on the calculator. `None` if Ndless does not appear to be installed.
+/// `Some` when `ndless_resources.tns` is in a documents folder.
+/// The file itself is not transferred. An empty string means Ndless is
+/// present and the version was not read.
 pub fn detect_ndless(bus: u8, addr: u8) -> Option<String> {
   const CANDIDATE_DIRS: &[&str] = &["/ndless", "ndless", "/documents/ndless"];
   for dir in CANDIDATE_DIRS {
@@ -341,36 +299,12 @@ pub fn detect_ndless(bus: u8, addr: u8) -> Option<String> {
       Ok(e) => e,
       Err(_) => continue,
     };
-    let resources = match entries
+    if entries
       .iter()
-      .find(|e| !e.is_dir && e.path.eq_ignore_ascii_case("ndless_resources.tns"))
+      .any(|e| !e.is_dir && e.path.eq_ignore_ascii_case("ndless_resources.tns"))
     {
-      Some(e) => e,
-      None => continue,
-    };
-    let remote = if dir.ends_with('/') {
-      format!("{dir}{}", resources.path)
-    } else {
-      format!("{dir}/{}", resources.path)
-    };
-    let size = resources.size;
-    if size == 0 || size > 4 * 1024 * 1024 {
       return Some(String::new());
     }
-    let bytes = with_handle(bus, addr, |h| {
-      let len = usize::try_from(size).map_err(|_| NlinkError::from("too large"))?;
-      let mut buf = vec![0; len];
-      h.read_file(&remote, &mut buf, &mut |_| {})?;
-      Ok(buf)
-    });
-    return match bytes {
-      Ok(buf) => Some(
-        zehn_executable_version(&buf)
-          .map(format_ndless_version)
-          .unwrap_or_default(),
-      ),
-      Err(_) => Some(String::new()),
-    };
   }
   None
 }
