@@ -49,6 +49,7 @@ struct packet {
 	} while (0)
 
 int packet_send(nspire_handle_t *h, struct packet p);
+int packet_send_nowait(nspire_handle_t *h, struct packet p);
 int packet_recv(nspire_handle_t *h, struct packet *p);
 struct packet packet_new(nspire_handle_t *h);
 int packet_ack(nspire_handle_t *h, struct packet p);

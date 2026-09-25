@@ -4,4 +4,6 @@ pub mod cli;
 pub mod device;
 pub mod error;
 pub mod ffi;
+pub mod link;
 pub mod progress;
+pub mod viewframe;

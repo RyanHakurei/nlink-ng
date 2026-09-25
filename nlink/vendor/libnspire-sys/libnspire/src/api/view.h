@@ -15,17 +15,15 @@
     along with libnspire.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef NSP_NSPIRE_H
-#define NSP_NSPIRE_H
+#ifndef NSP_VIEW_H
+#define NSP_VIEW_H
 
-#include "usb.h"
-#include "devinfo.h"
-#include "dir.h"
-#include "error.h"
-#include "file.h"
+#include <stdint.h>
 #include "handle.h"
-#include "os.h"
-#include "screenshot.h"
-#include "view.h"
+
+/* One frame from the resident nlink-view service (NavNet 0x40F1).
+ * *out is malloc'd and owned by the caller. The bytes are the 24-byte
+ * NLNKFRM1 header followed by the payload. */
+int nspire_view_frame(nspire_handle_t *handle, uint8_t **out, uint32_t *out_len);
 
 #endif

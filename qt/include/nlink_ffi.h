@@ -21,6 +21,8 @@ int nlink_enumerate(NLinkString *out_json, NLinkString *out_err);
 int nlink_open(uint8_t bus, uint8_t addr, NLinkString *out_json, NLinkString *out_err);
 int nlink_open_android(int32_t fd, uint8_t ep_in, uint8_t ep_out, uint8_t is_cx2,
                        NLinkString *out_json, NLinkString *out_err);
+int nlink_open_android_product(int32_t fd, uint8_t ep_in, uint8_t ep_out, uint16_t product,
+                               NLinkString *out_json, NLinkString *out_err);
 int nlink_close(uint8_t bus, uint8_t addr, NLinkString *out_err);
 int nlink_info(uint8_t bus, uint8_t addr, NLinkString *out_json, NLinkString *out_err);
 int nlink_list_dir(uint8_t bus, uint8_t addr, const char *path, NLinkString *out_json,
@@ -43,6 +45,10 @@ int nlink_upload_os(uint8_t bus, uint8_t addr, const char *src, NLinkProgressCb 
                     NLinkString *out_err);
 int nlink_backup(uint8_t bus, uint8_t addr, const char *dest, NLinkProgressCb cb, void *user,
                  NLinkString *out_err);
+int nlink_rom_dump(uint8_t bus, uint8_t addr, const char *dest, NLinkProgressCb cb, void *user,
+                   NLinkString *out_err);
+int nlink_rom_dump_android(int32_t fd, uint8_t ep_in, uint8_t ep_out, const char *dest,
+                           NLinkProgressCb cb, void *user, NLinkString *out_err);
 int nlink_restore(uint8_t bus, uint8_t addr, const char *src, NLinkProgressCb cb, void *user,
                   NLinkString *out_err);
 
@@ -54,7 +60,9 @@ typedef struct NLinkImage {
 } NLinkImage;
 
 void nlink_image_free(NLinkImage img);
+void nlink_set_io_timeout(uint32_t ms);
 int nlink_screenshot(uint8_t bus, uint8_t addr, NLinkImage *out, NLinkString *out_err);
+int nlink_view_frame(uint8_t bus, uint8_t addr, NLinkImage *out, NLinkString *out_err);
 int nlink_exit_exam_mode(uint8_t bus, uint8_t addr, NLinkString *out_err);
 int nlink_cli_run(void);
 

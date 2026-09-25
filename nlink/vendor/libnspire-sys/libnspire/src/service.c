@@ -45,6 +45,10 @@ int service_disconnect(nspire_handle_t *handle) {
 
 	p = packet_new(handle);
 	if ( (ret = data_write_special(handle, &data, 2, mod_src)) ) {
+		/* Leave the CX II session up. Marking it for a new handshake
+		 * here made every later call fail, because the calculator does
+		 * not send that handshake again. */
+		handle->connected = 0;
 		return ret;
 	}
 

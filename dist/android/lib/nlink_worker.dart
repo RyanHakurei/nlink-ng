@@ -34,13 +34,13 @@ class NlinkWorker {
     required int fd,
     required int epIn,
     required int epOut,
-    required bool isCx2,
+    required int productId,
   }) async {
     return await _rpc('open', {
           'fd': fd,
           'epIn': epIn,
           'epOut': epOut,
-          'isCx2': isCx2,
+          'productId': productId,
         })
         as String;
   }
@@ -86,12 +86,34 @@ class NlinkWorker {
     await _rpc('uploadFile', {'destDir': destDir, 'src': src});
   }
 
+  Future<void> backup(String dest) async {
+    await _rpc('backup', {'dest': dest});
+  }
+
+  Future<void> romDump({
+    required int fd,
+    required int epIn,
+    required int epOut,
+    required String dest,
+  }) async {
+    await _rpc('romDump', {'fd': fd, 'epIn': epIn, 'epOut': epOut, 'dest': dest});
+  }
+
   Future<void> exitExam() async {
     await _rpc('exitExam');
   }
 
   Future<({int width, int height, Uint8List rgba})> screenshot() async {
     final map = await _rpc('screenshot') as Map;
+    return (
+      width: map['width'] as int,
+      height: map['height'] as int,
+      rgba: map['rgba'] as Uint8List,
+    );
+  }
+
+  Future<({int width, int height, Uint8List rgba})> viewFrame() async {
+    final map = await _rpc('viewFrame') as Map;
     return (
       width: map['width'] as int,
       height: map['height'] as int,
@@ -117,7 +139,7 @@ void _isolateMain(SendPort ready) {
             fd: args['fd'] as int,
             epIn: args['epIn'] as int,
             epOut: args['epOut'] as int,
-            isCx2: args['isCx2'] as bool,
+            productId: args['productId'] as int,
           );
         case 'close':
           nlink.close();
@@ -154,12 +176,30 @@ void _isolateMain(SendPort ready) {
         case 'exitExam':
           nlink.exitExam();
           ok = true;
+        case 'backup':
+          nlink.backup(args['dest'] as String);
+          ok = true;
+        case 'romDump':
+          nlink.romDump(
+            fd: args['fd'] as int,
+            epIn: args['epIn'] as int,
+            epOut: args['epOut'] as int,
+            dest: args['dest'] as String,
+          );
+          ok = true;
         case 'screenshot':
           final shot = nlink.screenshot();
           ok = {
             'width': shot.width,
             'height': shot.height,
             'rgba': Uint8List.fromList(shot.rgba),
+          };
+        case 'viewFrame':
+          final frame = nlink.viewFrame();
+          ok = {
+            'width': frame.width,
+            'height': frame.height,
+            'rgba': Uint8List.fromList(frame.rgba),
           };
         default:
           throw NlinkException('unknown op $op');

@@ -154,29 +154,35 @@ static uint16_t compute_checksum(const uint8_t *data, uint32_t size)
 	return acc;
 }
 
-static bool readPacket(usb_device_t *usb, NNSEMessage *message, int maxlen)
+/* 0 on a full packet. A negative NSPIRE_ERR_* otherwise, so a timeout is
+ * not reported as a bad packet. */
+static int readPacket(usb_device_t *usb, NNSEMessage *message, int maxlen)
 {
-	if(maxlen < sizeof(NNSEMessage))
-		return false;
+	if(maxlen < (int)sizeof(NNSEMessage))
+		return -NSPIRE_ERR_INVALID;
 
 	int transferred = 0;
 	memset(message, 0, sizeof(NNSEMessage));
 #ifdef __ANDROID__
-	const unsigned int first_read_timeout = 4000;
+	const unsigned int default_read_timeout = 4000;
 #else
-	const unsigned int first_read_timeout = 60000;
+	const unsigned int default_read_timeout = 60000;
 #endif
-	int r = usb_bulk(usb, usb->ep_in, reinterpret_cast<unsigned char*>(message), maxlen, &transferred, first_read_timeout);
+	unsigned int read_timeout = nspire_io_timeout();
+	if (!read_timeout)
+		read_timeout = default_read_timeout;
+	int r = usb_bulk(usb, usb->ep_in, reinterpret_cast<unsigned char*>(message), maxlen, &transferred, read_timeout);
 
-	if(r < 0
-		|| transferred < sizeof(NNSEMessage))
-		return false;
+	if(r < 0)
+		return r;
+	if(transferred < (int)sizeof(NNSEMessage))
+		return -NSPIRE_ERR_INVALPKT;
 
 	const auto completeLength = ntohs(message->length);
 
 	if(completeLength < sizeof(NNSEMessage)
 		|| completeLength > maxlen)
-		return false;
+		return -NSPIRE_ERR_INVALPKT;
 
 	uint8_t *data = reinterpret_cast<uint8_t*>(message) + transferred;
 	auto remainingLength = completeLength - transferred;
@@ -184,7 +190,9 @@ static bool readPacket(usb_device_t *usb, NNSEMessage *message, int maxlen)
 	{
 		r = usb_bulk(usb, usb->ep_in, data, remainingLength, &transferred, 1000);
 		if(r < 0)
-			return false;
+			return r;
+		if(transferred <= 0)
+			return -NSPIRE_ERR_INVALPKT;
 
 		data += transferred;
 		remainingLength -= transferred;
@@ -196,9 +204,9 @@ static bool readPacket(usb_device_t *usb, NNSEMessage *message, int maxlen)
 #endif
 
 	if(compute_checksum(reinterpret_cast<uint8_t*>(message), transferred) != 0xFFFF)
-		return false;
+		return -NSPIRE_ERR_INVALPKT;
 
-	return true;
+	return 0;
 }
 
 static bool writePacket(usb_device_t *handle, NNSEMessage *message)
@@ -385,6 +393,11 @@ static void handlePacket(struct nspire_handle *nsp_handle, NNSEMessage *message,
 
 static bool assureReady(struct nspire_handle *nsp_handle)
 {
+	if(nsp_handle->device.recover) {
+		nsp_handle->device.recover = 0;
+		nsp_handle->cx2_handshake_complete = false;
+		nsp_handle->connected = 0;
+	}
 	if(nsp_handle->cx2_handshake_complete)
 		return true;
 
@@ -394,7 +407,7 @@ static bool assureReady(struct nspire_handle *nsp_handle)
 	NNSEMessage * const message = reinterpret_cast<NNSEMessage*>(malloc(maxlen));
 	for(int i = 10; i-- && !nsp_handle->cx2_handshake_complete;)
 	{
-		if(!readPacket(handle, message, maxlen))
+		if(readPacket(handle, message, maxlen) != 0)
 			continue;
 
 		handlePacket(nsp_handle, message);
@@ -434,7 +447,7 @@ int packet_send_cx2(struct nspire_handle *nsp_handle, char *data, int size)
 		bool acked = false;
 		for(int i = 10; i-- && !ret && !acked;)
 		{
-			if(!readPacket(handle, message, maxlen))
+			if(readPacket(handle, message, maxlen) != 0)
 				continue;
 
 			handlePacket(nsp_handle, message);
@@ -456,6 +469,30 @@ int packet_send_cx2(struct nspire_handle *nsp_handle, char *data, int size)
 	return ret;
 }
 
+int packet_send_cx2_nowait(struct nspire_handle *nsp_handle, char *data, int size)
+{
+	if(!assureReady(nsp_handle))
+		return -NSPIRE_ERR_BUSY;
+
+	usb_device_t *handle = &nsp_handle->device;
+	int len = sizeof(NNSEMessage) + size;
+	NNSEMessage *msg = reinterpret_cast<NNSEMessage*>(malloc(len));
+	if(!msg)
+		return -NSPIRE_ERR_NOMEM;
+
+	msg->service = StreamService;
+	msg->src = AddrMe;
+	msg->dest = AddrCalc;
+	msg->reqAck = 1;
+	msg->length = htons(len);
+	msg->seqno = htons(nextSeqno());
+	memcpy(getPacketData(msg), data, size);
+
+	int ret = writePacket(handle, msg) ? -NSPIRE_ERR_SUCCESS : -NSPIRE_ERR_BUSY;
+	free(msg);
+	return ret;
+}
+
 int packet_recv_cx2(struct nspire_handle *nsp_handle, char *data, int size)
 {
 	if(!assureReady(nsp_handle))
@@ -470,8 +507,19 @@ int packet_recv_cx2(struct nspire_handle *nsp_handle, char *data, int size)
 	int streamsize = 0;
 	for(int i = 10; i-- && !streamdata;)
 	{
-		if(!readPacket(handle, message, maxlen))
-			continue;
+		int rr = readPacket(handle, message, maxlen);
+		if(rr < 0) {
+			/* Live view sets a short timeout. Return that failure as
+			 * itself so a slow calculator is a timeout, not a bad packet. */
+			if (nspire_io_timeout()) {
+				free(message);
+				return rr;
+			}
+			if (rr == -NSPIRE_ERR_TIMEOUT)
+				continue;
+			free(message);
+			return rr;
+		}
 
 		handlePacket(nsp_handle, message, &streamdata, &streamsize);
 	}

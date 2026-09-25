@@ -25,6 +25,8 @@ class MainActivity : FlutterActivity() {
     private var pickResult: MethodChannel.Result? = null
     private var pickRequest: Int = 0
     private var connection: UsbDeviceConnection? = null
+    private var linkEpIn: Int = 0
+    private var linkEpOut: Int = 0
     private var claimedInterface: android.hardware.usb.UsbInterface? = null
     private var channel: MethodChannel? = null
     private val pickFilesRequest = 42
@@ -79,6 +81,20 @@ class MainActivity : FlutterActivity() {
                         closeDevice()
                         result.success(null)
                     }
+                    "currentLink" -> {
+                        val conn = connection
+                        if (conn == null || linkEpIn == 0 || linkEpOut == 0) {
+                            result.success(null)
+                        } else {
+                            result.success(
+                                mapOf(
+                                    "fd" to conn.fileDescriptor,
+                                    "epIn" to linkEpIn,
+                                    "epOut" to linkEpOut,
+                                ),
+                            )
+                        }
+                    }
                     "pickFiles" -> pickFiles(result)
                     "pickSaveFile" -> pickSaveFile(call.argument<String>("name") ?: "download.bin", result)
                     "pickSaveTree" -> pickSaveTree(result)
@@ -131,26 +147,32 @@ class MainActivity : FlutterActivity() {
     private fun listDevices(): List<Map<String, Any>> {
         val manager = usbManager()
         return manager.deviceList.values.map { device ->
-            val nspire = isNspire(device)
+            val supported = isSupported(device)
             mapOf(
                 "deviceId" to device.deviceId,
                 "vendorId" to device.vendorId,
                 "productId" to device.productId,
                 "name" to (device.productName ?: device.deviceName),
-                "isNspire" to nspire,
-                "model" to nspireModel(device),
+                "isNspire" to supported,
+                "model" to calculatorModel(device),
                 "hasPermission" to manager.hasPermission(device),
             )
         }
     }
 
-    private fun isNspire(device: UsbDevice): Boolean =
-        device.vendorId == 0x0451 &&
-            (device.productId == 0xe012 || device.productId == 0xe022)
+    private fun isSupported(device: UsbDevice): Boolean =
+        device.vendorId == 0x0451 && device.productId in setOf(
+            0xe001, 0xe003, 0xe008, 0xe012, 0xe018, 0xe022,
+        )
 
-    private fun nspireModel(device: UsbDevice): String {
-        if (!isNspire(device)) return ""
-        return if (device.productId == 0xe022) "TI-Nspire CX II" else "TI-Nspire"
+    private fun calculatorModel(device: UsbDevice): String = when (device.productId) {
+        0xe022 -> "TI-Nspire CX II"
+        0xe012 -> "TI-Nspire"
+        0xe001 -> "SilverLink"
+        0xe003 -> "TI-84 Plus"
+        0xe008 -> "TI-84 Plus / CE"
+        0xe018 -> "TI-84 Evo"
+        else -> ""
     }
 
     private fun requestPermission(deviceId: Int, result: MethodChannel.Result) {
@@ -221,11 +243,14 @@ class MainActivity : FlutterActivity() {
         }
         connection = conn
         claimedInterface = claimed
+        linkEpIn = epIn
+        linkEpOut = epOut
         return mapOf(
             "fd" to conn.fileDescriptor,
             "epIn" to epIn,
             "epOut" to epOut,
             "isCx2" to (device.productId == 0xe022),
+            "productId" to device.productId,
         )
     }
 
@@ -430,5 +455,7 @@ class MainActivity : FlutterActivity() {
         }
         claimedInterface = null
         connection = null
+        linkEpIn = 0
+        linkEpOut = 0
     }
 }

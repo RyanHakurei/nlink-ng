@@ -26,6 +26,16 @@
 #define NSP_DEFAULT_IFACE 0
 #define NSP_TIMEOUT 10000
 
+static unsigned int io_timeout;
+
+void nspire_set_io_timeout(unsigned int ms) {
+	io_timeout = ms;
+}
+
+unsigned int nspire_io_timeout(void) {
+	return io_timeout;
+}
+
 #ifdef __ANDROID__
 static int android_fd = -1;
 static unsigned char android_ep_in;
@@ -52,6 +62,7 @@ int usb_get_device(usb_device_t *handle, libusb_device_handle *dev) {
 	handle->dev = NULL;
 	handle->ep_in = android_ep_in;
 	handle->ep_out = android_ep_out;
+	handle->recover = 0;
 	return NSPIRE_ERR_SUCCESS;
 }
 
@@ -82,6 +93,14 @@ int usb_bulk(usb_device_t *handle, unsigned char ep, void *ptr, int len,
 	if (transferred)
 		*transferred = r;
 	return 0;
+}
+
+int nlink_android_bulk(unsigned char ep, void *ptr, int len, int *transferred,
+		       unsigned int timeout)
+{
+	usb_device_t dummy;
+	memset(&dummy, 0, sizeof(dummy));
+	return usb_bulk(&dummy, ep, ptr, len, transferred, timeout);
 }
 
 #else
@@ -143,6 +162,7 @@ int usb_get_device(usb_device_t *handle, libusb_device_handle *dev) {
 		goto error_close;
 
 	handle->dev = dev;
+	handle->recover = 0;
 	return NSPIRE_ERR_SUCCESS;
 error_free_desc:
 	libusb_free_config_descriptor(config);
@@ -164,6 +184,20 @@ int usb_bulk(usb_device_t *handle, unsigned char ep, void *ptr, int len,
 		return -NSPIRE_ERR_NODEVICE;
 	case LIBUSB_ERROR_TIMEOUT:
 		return -NSPIRE_ERR_TIMEOUT;
+	case LIBUSB_ERROR_PIPE:
+	case LIBUSB_ERROR_IO:
+	case LIBUSB_ERROR_OVERFLOW:
+	case LIBUSB_ERROR_BUSY:
+	case LIBUSB_ERROR_INTERRUPTED:
+	case LIBUSB_ERROR_OTHER:
+		/* A stalled bulk pipe. Clear it and let the caller retry.
+		 * Do not drop the CX II session: a new handshake never arrives
+		 * unless the device is actually reset. */
+		if (handle->dev) {
+			libusb_clear_halt(handle->dev, handle->ep_in);
+			libusb_clear_halt(handle->dev, handle->ep_out);
+		}
+		return -NSPIRE_ERR_TIMEOUT;
 	default:
 		return -NSPIRE_ERR_LIBUSB;
 	}
@@ -173,7 +207,8 @@ int usb_bulk(usb_device_t *handle, unsigned char ep, void *ptr, int len,
 
 static int usb_xfer(usb_device_t *handle, unsigned char ep, void *ptr, int len) {
 	int transferred = 0;
-	int ret = usb_bulk(handle, ep, ptr, len, &transferred, NSP_TIMEOUT);
+	unsigned int timeout = nspire_io_timeout();
+	int ret = usb_bulk(handle, ep, ptr, len, &transferred, timeout ? timeout : NSP_TIMEOUT);
 	if (ret == 0)
 		return (len - transferred);
 	return ret;

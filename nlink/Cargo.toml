@@ -32,3 +32,4 @@ rusb = "0.6.4"
 
 [patch.crates-io]
 libnspire-sys = { path = "vendor/libnspire-sys" }
+libnspire = { path = "vendor/libnspire-rs" }

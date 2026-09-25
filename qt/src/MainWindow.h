@@ -62,8 +62,10 @@ private slots:
   void renameSelected();
   void uploadOs();
   void backupCalculator();
+  void romDump();
   void restoreCalculator();
   void screenshotCalculator();
+  void liveView();
   void exitExamMode();
   void showNavigatorSubdirs(const QString &path, const QPoint &globalPos);
   void showAbout();
@@ -116,8 +118,11 @@ private:
   QToolButton *m_iconsBtn = nullptr;
   QPushButton *m_osButton = nullptr;
   QPushButton *m_backup = nullptr;
+  QPushButton *m_romDump = nullptr;
   QPushButton *m_restore = nullptr;
   QPushButton *m_screenshot = nullptr;
+  QPushButton *m_liveView = nullptr;
+  QPushButton *m_liveViewBar = nullptr;
   QPushButton *m_exitExam = nullptr;
   QProgressBar *m_transfer = nullptr;
   QLabel *m_queueLabel = nullptr;
@@ -136,6 +141,10 @@ private:
 
   int m_bus = -1;
   int m_addr = -1;
+  bool m_nspire = true;
+  bool m_z80Backup = false;
+  bool m_silverlink = false;
+  bool m_canRomDump = false;
   QString m_path;
   bool m_busy = false;
   QHash<QString, QStringList> m_dirCache;

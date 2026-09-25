@@ -26,6 +26,7 @@
 #include <QFutureWatcher>
 #include <QPair>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFont>
 #include <QHBoxLayout>
@@ -39,6 +40,9 @@
 #include <QJsonObject>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QPixmap>
 #include <QListView>
 #include <QMenu>
 #include <QMessageBox>
@@ -48,6 +52,7 @@
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStandardItemModel>
@@ -55,11 +60,14 @@
 #include <QStyle>
 #include <QTableView>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QtConcurrent>
+
+#include <atomic>
 
 namespace {
 
@@ -492,8 +500,6 @@ void MainWindow::buildUi() {
   auto *splitter = new QSplitter(Qt::Horizontal, this);
 
   auto *left = new QWidget;
-  left->setMinimumWidth(240);
-  left->setMaximumWidth(320);
   auto *leftLay = new QVBoxLayout(left);
 
   auto *devRow = new QHBoxLayout;
@@ -532,13 +538,18 @@ void MainWindow::buildUi() {
 
   m_osButton = new QPushButton("Upload OS");
   m_backup = new QPushButton("Backup");
+  m_romDump = new QPushButton("ROM dump");
   m_restore = new QPushButton("Restore");
   m_screenshot = new QPushButton("Screenshot");
+  m_liveView = new QPushButton("Live view");
+  m_liveView->setToolTip("Show the calculator screen over the normal link.");
   m_exitExam = new QPushButton("Exit exam mode");
   leftLay->addWidget(m_osButton);
   leftLay->addWidget(m_backup);
+  leftLay->addWidget(m_romDump);
   leftLay->addWidget(m_restore);
   leftLay->addWidget(m_screenshot);
+  leftLay->addWidget(m_liveView);
   leftLay->addWidget(m_exitExam);
   leftLay->addStretch();
 
@@ -578,9 +589,13 @@ void MainWindow::buildUi() {
                        QIcon::fromTheme(QStringLiteral("help-about"),
                                         style()->standardIcon(QStyle::SP_MessageBoxQuestion)))));
 
+  m_liveViewBar = new QPushButton(QStringLiteral("Live view"));
+  m_liveViewBar->setToolTip(m_liveView->toolTip());
+
   auto *crumbRow = new QHBoxLayout;
   crumbRow->setContentsMargins(0, 0, 0, 0);
   crumbRow->setSpacing(6);
+  crumbRow->addWidget(m_liveViewBar);
   crumbRow->addWidget(m_navigator, 1);
   crumbRow->addWidget(m_detailsBtn);
   crumbRow->addWidget(m_iconsBtn);
@@ -641,7 +656,14 @@ void MainWindow::buildUi() {
   m_stack->addWidget(m_iconsView);
   rightLay->addWidget(m_stack, 1);
 
-  splitter->addWidget(left);
+  auto *leftScroll = new QScrollArea;
+  leftScroll->setWidgetResizable(true);
+  leftScroll->setFrameShape(QFrame::NoFrame);
+  leftScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  leftScroll->setMinimumWidth(240);
+  leftScroll->setMaximumWidth(320);
+  leftScroll->setWidget(left);
+  splitter->addWidget(leftScroll);
   splitter->addWidget(right);
   splitter->setStretchFactor(1, 1);
   setCentralWidget(splitter);
@@ -671,8 +693,11 @@ void MainWindow::buildUi() {
   connect(QApplication::clipboard(), &QClipboard::dataChanged, this, &MainWindow::updateActions);
   connect(m_osButton, &QPushButton::clicked, this, &MainWindow::uploadOs);
   connect(m_backup, &QPushButton::clicked, this, &MainWindow::backupCalculator);
+  connect(m_romDump, &QPushButton::clicked, this, &MainWindow::romDump);
   connect(m_restore, &QPushButton::clicked, this, &MainWindow::restoreCalculator);
   connect(m_screenshot, &QPushButton::clicked, this, &MainWindow::screenshotCalculator);
+  connect(m_liveView, &QPushButton::clicked, this, &MainWindow::liveView);
+  connect(m_liveViewBar, &QPushButton::clicked, this, &MainWindow::liveView);
   connect(m_exitExam, &QPushButton::clicked, this, &MainWindow::exitExamMode);
   connect(aboutBtn, &QToolButton::clicked, this, &MainWindow::showAbout);
 
@@ -733,7 +758,8 @@ void MainWindow::showAbout() {
   body->setOpenExternalLinks(true);
   body->setTextInteractionFlags(Qt::TextBrowserInteraction);
   body->setText(QStringLiteral(
-      "<p>Native linking program for TI-Nspire calculators.</p>"
+      "<p>Linking program for TI-Nspire, TI-83/84 (USB and SilverLink), TI-84 Plus CE, and TI-84 Evo.</p>"
+      "<p>83/84, CE, and Evo transfers are implemented from the published protocols and have not been verified on a calculator in this build.</p>"
       "<p>Maintained by Ryan<br>"
       "<a href=\"https://github.com/RyanHakurei/nlink-ng\">github.com/RyanHakurei/nlink-ng</a></p>"
       "<p>Based on N-Link by Ben Schattinger<br>"
@@ -783,11 +809,14 @@ void MainWindow::setBusy(bool busy) {
   m_navigator->setEnabled(on);
   m_detailsView->setEnabled(!busy);
   m_iconsView->setEnabled(!busy);
-  m_osButton->setEnabled(on);
-  m_backup->setEnabled(on);
-  m_restore->setEnabled(on);
+  m_osButton->setEnabled(on && m_nspire);
+  m_backup->setEnabled(on && (m_nspire || m_z80Backup));
+  m_romDump->setEnabled(on && m_canRomDump);
+  m_restore->setEnabled(on && m_nspire);
   m_screenshot->setEnabled(on);
-  m_exitExam->setEnabled(on);
+  m_liveView->setEnabled(on && m_nspire);
+  m_liveViewBar->setEnabled(on && m_nspire);
+  m_exitExam->setEnabled(on && m_nspire);
   m_devices->setEnabled(!busy);
   updateActions();
 }
@@ -829,7 +858,15 @@ void MainWindow::hideTransferUi() {
 }
 
 void MainWindow::updateInfoPanel(const QJsonObject &info) {
-  m_name->setText(info.value("name").toString("TI-Nspire"));
+  const QString family = info.value(QStringLiteral("family")).toString(QStringLiteral("nspire"));
+  const QString model = info.value(QStringLiteral("name")).toString();
+  m_nspire = family == QLatin1String("nspire");
+  const bool ce = model.contains(QStringLiteral("CE"), Qt::CaseInsensitive);
+  m_silverlink = family == QLatin1String("silverlink");
+  m_z80Backup = m_silverlink || (family == QLatin1String("dusb") && !ce);
+  m_canRomDump = family == QLatin1String("dusb") && model.contains(QStringLiteral("84")) && !ce &&
+                 !model.contains(QStringLiteral("Evo"), Qt::CaseInsensitive);
+  m_name->setText(model.isEmpty() ? QStringLiteral("TI-Nspire") : model);
   QString os = QStringLiteral("OS ") + formatVersion(info.value("version").toObject());
   if (info.contains(QStringLiteral("ndless"))) {
     const QString ndless = info.value(QStringLiteral("ndless")).toString();
@@ -838,8 +875,21 @@ void MainWindow::updateInfoPanel(const QJsonObject &info) {
     else
       os += QStringLiteral(" (Ndless %1)").arg(ndless);
   }
+  if (!m_nspire)
+    os += QStringLiteral("  ·  not verified on hardware");
   m_os->setText(os);
-  m_id->setText(info.value("id").toString());
+  QString details = info.value("id").toString();
+  if (info.contains(QStringLiteral("battery"))) {
+    if (!details.isEmpty())
+      details += QStringLiteral("\n");
+    details += QStringLiteral("Battery %1").arg(info.value(QStringLiteral("battery")).toString());
+  }
+  if (info.contains(QStringLiteral("clock"))) {
+    if (!details.isEmpty())
+      details += QStringLiteral("\n");
+    details += QStringLiteral("Clock %1").arg(info.value(QStringLiteral("clock")).toString());
+  }
+  m_id->setText(details);
   const double storageTotal = info.value("total_storage").toDouble();
   const double storageFree = info.value("free_storage").toDouble();
   const double ramTotal = info.value("total_ram").toDouble();
@@ -850,10 +900,14 @@ void MainWindow::updateInfoPanel(const QJsonObject &info) {
     m_storage->setFormat(formatSize(static_cast<qint64>(storageTotal - storageFree)) + " / " +
                          formatSize(static_cast<qint64>(storageTotal)));
   }
-  if (ramTotal > 0) {
-    const int used = static_cast<int>(((ramTotal - ramFree) / ramTotal) * 100);
-    m_ram->setValue(used);
-    m_ram->setFormat(formatSize(static_cast<qint64>(ramTotal - ramFree)) + " / " +
+  if (info.contains(QStringLiteral("ram_note"))) {
+    m_ram->setValue(0);
+    m_ram->setFormat(info.value(QStringLiteral("ram_note")).toString());
+  } else if (ramTotal > 0) {
+    const double usedBytes = std::max(0.0, ramTotal - ramFree);
+    const int used = static_cast<int>((usedBytes / ramTotal) * 100);
+    m_ram->setValue(std::clamp(used, 0, 100));
+    m_ram->setFormat(formatSize(static_cast<qint64>(usedBytes)) + " / " +
                      formatSize(static_cast<qint64>(ramTotal)));
   }
 }
@@ -879,6 +933,10 @@ void MainWindow::refreshDevices() {
   }
   if (m_devices->count() == 0) {
     m_bus = m_addr = -1;
+    m_nspire = true;
+    m_z80Backup = false;
+    m_silverlink = false;
+    m_canRomDump = false;
     m_path.clear();
     m_dirCache.clear();
     m_name->setText("No calculator");
@@ -1211,15 +1269,15 @@ void MainWindow::updateActions() {
   if (m_uploadAct)
     m_uploadAct->setEnabled(ready);
   if (m_mkdirAct)
-    m_mkdirAct->setEnabled(ready);
+    m_mkdirAct->setEnabled(ready && m_nspire);
   if (m_cutAct)
-    m_cutAct->setEnabled(any);
+    m_cutAct->setEnabled(any && m_nspire);
   if (m_copyAct)
-    m_copyAct->setEnabled(any);
+    m_copyAct->setEnabled(any && m_nspire);
   if (m_pasteAct)
-    m_pasteAct->setEnabled(ready && clipboardHasPaste());
+    m_pasteAct->setEnabled(ready && m_nspire && clipboardHasPaste());
   if (m_renameAct)
-    m_renameAct->setEnabled(one);
+    m_renameAct->setEnabled(one && m_nspire);
   if (m_deleteAct)
     m_deleteAct->setEnabled(any);
   if (m_upAct)
@@ -1741,6 +1799,203 @@ void MainWindow::screenshotCalculator() {
   }));
 }
 
+void MainWindow::liveView() {
+  if (!hasDevice() || !m_nspire)
+    return;
+  setBusy(true);
+  m_status->setText(QStringLiteral("Live view"));
+
+  QDialog dlg(this);
+  dlg.setWindowTitle(QStringLiteral("Live view"));
+  auto *lay = new QVBoxLayout(&dlg);
+  auto *note = new QLabel(QStringLiteral(
+      "Shows the calculator screen over the normal link. The keypad stays usable."));
+  note->setWordWrap(true);
+  auto *preview = new QLabel(QStringLiteral("Waiting for a frame…"));
+  preview->setAlignment(Qt::AlignCenter);
+  // Screenshots are 320x240 and shown at 2x. Reserve that space up front
+  // so the pixmap is not clipped until the window is resized by hand.
+  preview->setMinimumSize(640, 480);
+  auto *status = new QLabel;
+  status->setWordWrap(true);
+  lay->addWidget(note);
+  lay->addWidget(preview, 1);
+  lay->addWidget(status);
+
+  std::atomic<int> liveBus{m_bus};
+  std::atomic<int> liveAddr{m_addr};
+  struct Frame {
+    QMutex mutex;
+    QImage image;
+    QString error;
+    bool haveImage = false;
+  } frame;
+  std::atomic<bool> run{true};
+  auto future = QtConcurrent::run([&run, &frame, &liveBus, &liveAddr] {
+    auto linkDown = [](const QString &message) {
+      return message.contains(QLatin1String("libusb"), Qt::CaseInsensitive) ||
+             message.contains(QLatin1String("disconnected"), Qt::CaseInsensitive) ||
+             message.contains(QLatin1String("timed out"), Qt::CaseInsensitive) ||
+             message.contains(QLatin1String("busy"), Qt::CaseInsensitive) ||
+             message.contains(QLatin1String("invalid response"), Qt::CaseInsensitive) ||
+             message.contains(QLatin1String("invalid packet"), Qt::CaseInsensitive);
+    };
+    auto reopen = [&liveBus, &liveAddr] {
+      NLinkString err{};
+      nlink_close(static_cast<uint8_t>(liveBus.load()), static_cast<uint8_t>(liveAddr.load()), &err);
+      takeString(err);
+      NLinkString json{};
+      if (nlink_enumerate(&json, &err) != 0) {
+        takeString(err);
+        nlink_string_free(json);
+        return;
+      }
+      const QByteArray bytes(json.data, static_cast<int>(json.len));
+      nlink_string_free(json);
+      takeString(err);
+      const QJsonArray arr = QJsonDocument::fromJson(bytes).array();
+      for (const auto &val : arr) {
+        const QJsonObject o = val.toObject();
+        if (o.value(QStringLiteral("family")).toString() != QLatin1String("nspire"))
+          continue;
+        const int bus = o.value(QStringLiteral("busNumber")).toInt();
+        const int addr = o.value(QStringLiteral("address")).toInt();
+        NLinkString info{};
+        if (nlink_open(static_cast<uint8_t>(bus), static_cast<uint8_t>(addr), &info, &err) == 0) {
+          liveBus.store(bus);
+          liveAddr.store(addr);
+        }
+        nlink_string_free(info);
+        takeString(err);
+        break;
+      }
+    };
+    int hardFails = 0;
+    while (run.load()) {
+      nlink_set_io_timeout(400);
+      NLinkImage img{};
+      NLinkString err{};
+      const int rc = nlink_screenshot(static_cast<uint8_t>(liveBus.load()),
+                                     static_cast<uint8_t>(liveAddr.load()), &img, &err);
+      nlink_set_io_timeout(0);
+      if (!run.load()) {
+        nlink_image_free(img);
+        takeString(err);
+        break;
+      }
+      if (rc != 0) {
+        QString message = takeString(err);
+        nlink_image_free(img);
+        const bool hard =
+            message.contains(QLatin1String("libusb"), Qt::CaseInsensitive) ||
+            message.contains(QLatin1String("disconnected"), Qt::CaseInsensitive) ||
+            message.contains(QLatin1String("no device"), Qt::CaseInsensitive) ||
+            message.contains(QLatin1String("invalid packet"), Qt::CaseInsensitive) ||
+            message.contains(QLatin1String("invalid response"), Qt::CaseInsensitive) ||
+            message.contains(QLatin1String("busy"), Qt::CaseInsensitive);
+        if (hard)
+          hardFails++;
+        /* A timeout while a page is opening is normal. A busy, invalid, or
+         * libusb result means this session will not deliver another frame. */
+        if (hardFails >= 2) {
+          nlink_set_io_timeout(2000);
+          reopen();
+          nlink_set_io_timeout(0);
+          hardFails = 0;
+        }
+        if (hard || linkDown(message))
+          message = QStringLiteral("Calculator is busy");
+        {
+          QMutexLocker lock(&frame.mutex);
+          frame.error = message;
+        }
+        QThread::msleep(200);
+        continue;
+      }
+      hardFails = 0;
+      takeString(err);
+      if (img.rgba == nullptr || img.width <= 0 || img.height <= 0) {
+        nlink_image_free(img);
+        {
+          QMutexLocker lock(&frame.mutex);
+          frame.error = QStringLiteral("The calculator sent an empty frame.");
+        }
+        QThread::msleep(200);
+        continue;
+      }
+      const QImage view(img.rgba, img.width, img.height, img.stride, QImage::Format_RGBA8888);
+      const QImage copy = view.copy();
+      nlink_image_free(img);
+      {
+        QMutexLocker lock(&frame.mutex);
+        frame.image = copy;
+        frame.haveImage = true;
+        frame.error.clear();
+      }
+    }
+  });
+
+  QTimer refresh;
+  connect(&refresh, &QTimer::timeout, &dlg, [&dlg, &frame, preview, status] {
+    QImage image;
+    QString error;
+    bool have = false;
+    {
+      QMutexLocker lock(&frame.mutex);
+      image = frame.image;
+      error = frame.error;
+      have = frame.haveImage;
+    }
+    if (have && !image.isNull()) {
+      QPixmap pix = QPixmap::fromImage(image);
+      if (pix.width() > 0 && pix.width() < 480)
+        pix = pix.scaled(pix.size() * 2, Qt::KeepAspectRatio, Qt::FastTransformation);
+      if (preview->minimumWidth() < pix.width() || preview->minimumHeight() < pix.height()) {
+        preview->setMinimumSize(pix.size());
+        dlg.adjustSize();
+      }
+      preview->setPixmap(pix);
+    }
+    if (!error.isEmpty())
+      status->setText(error);
+    else if (have)
+      status->setText(QStringLiteral("Receiving"));
+  });
+  refresh.start(100);
+
+  auto *buttons = new QDialogButtonBox;
+  auto *saveBtn = buttons->addButton(QStringLiteral("Save…"), QDialogButtonBox::ActionRole);
+  buttons->addButton(QDialogButtonBox::Close);
+  connect(saveBtn, &QPushButton::clicked, &dlg, [preview, status, this] {
+    const QPixmap pix = preview->pixmap();
+    if (pix.isNull())
+      return;
+    const QString suggested =
+        QStringLiteral("nlink-ng-live-%1.png")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")));
+    const QString path = QFileDialog::getSaveFileName(preview, "Save frame", suggested, "PNG image (*.png)");
+    if (path.isEmpty())
+      return;
+    if (!pix.save(path, "PNG"))
+      status->setText(QStringLiteral("Failed to save frame"));
+    else
+      m_status->setText(QStringLiteral("Saved %1").arg(path));
+  });
+  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  lay->addWidget(buttons);
+
+  dlg.adjustSize();
+  dlg.exec();
+  run.store(false);
+  future.waitForFinished();
+  if (liveBus.load() >= 0 && liveAddr.load() >= 0) {
+    m_bus = liveBus.load();
+    m_addr = liveAddr.load();
+  }
+  setBusy(false);
+  m_status->setText(QStringLiteral("Live view stopped"));
+}
+
 void MainWindow::exitExamMode() {
   if (!hasDevice())
     return;
@@ -1780,11 +2035,15 @@ void MainWindow::exitExamMode() {
 }
 
 void MainWindow::backupCalculator() {
-  const QString suggested =
-      QStringLiteral("nlink-ng-backup-%1.tar.gz")
-          .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm")));
-  const QString dest = QFileDialog::getSaveFileName(
-      this, "Backup calculator", suggested, "Backup archive (*.tar.gz *.tgz)");
+  const QString suggested = m_nspire
+      ? QStringLiteral("nlink-ng-backup-%1.tar.gz")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm")))
+      : QStringLiteral("nlink-ng-ram-%1.%2")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm")),
+                 m_silverlink ? QStringLiteral("8xb") : QStringLiteral("8xg"));
+  const QString filter = m_nspire ? QStringLiteral("Backup archive (*.tar.gz *.tgz)")
+                                  : QStringLiteral("TI RAM backup (*.8xb *.8xg)");
+  const QString dest = QFileDialog::getSaveFileName(this, "Backup calculator", suggested, filter);
   if (dest.isEmpty())
     return;
   setBusy(true);
@@ -1809,6 +2068,48 @@ void MainWindow::backupCalculator() {
     const int rc = nlink_backup(static_cast<uint8_t>(bus), static_cast<uint8_t>(addr),
                                 destUtf.constData(), nlinkProgressThunk,
                                 const_cast<MainWindow *>(this), &err);
+    if (rc != 0)
+      return takeString(err);
+    takeString(err);
+    return QString();
+  }));
+}
+
+void MainWindow::romDump() {
+  const auto reply = QMessageBox::question(
+      this, "ROM dump",
+      "This reads the ROM from a TI-84 Plus or TI-84 Plus Silver Edition that is already running "
+      "the USB ROM dumper (the program TiLP uses; the screen should say Dumping).\n\n"
+      "It does not work on the CE or the Evo. nlink will close the normal link and talk to the dumper.\n\n"
+      "Continue?");
+  if (reply != QMessageBox::Yes)
+    return;
+  const QString dest = QFileDialog::getSaveFileName(
+      this, "Save ROM", QStringLiteral("ti84.rom"), QStringLiteral("ROM image (*.rom)"));
+  if (dest.isEmpty())
+    return;
+  setBusy(true);
+  m_transfer->setVisible(true);
+  m_status->setText("Dumping ROM…");
+  const int bus = m_bus;
+  const int addr = m_addr;
+  auto *watcher = new QFutureWatcher<QString>(this);
+  connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
+    const QString err = watcher->result();
+    watcher->deleteLater();
+    setBusy(false);
+    hideTransferUi();
+    if (!err.isEmpty())
+      showError(err);
+    else
+      m_status->setText("ROM dump saved. Restart the calculator to use the normal link again.");
+  });
+  watcher->setFuture(QtConcurrent::run([bus, addr, dest, this] {
+    NLinkString err{};
+    const QByteArray destUtf = dest.toUtf8();
+    const int rc = nlink_rom_dump(static_cast<uint8_t>(bus), static_cast<uint8_t>(addr),
+                                  destUtf.constData(), nlinkProgressThunk,
+                                  const_cast<MainWindow *>(this), &err);
     if (rc != 0)
       return takeString(err);
     takeString(err);

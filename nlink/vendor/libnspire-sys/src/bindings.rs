@@ -778,8 +778,14 @@ fn bindgen_test_layout_nspire_image() {
     );
 }
 extern "C" {
+    pub fn nspire_set_io_timeout(ms: u32);
     pub fn nspire_screenshot(
         handle: *mut nspire_handle_t,
         ptr: *mut *mut nspire_image,
+    ) -> ::std::os::raw::c_int;
+    pub fn nspire_view_frame(
+        handle: *mut nspire_handle_t,
+        out: *mut *mut u8,
+        out_len: *mut u32,
     ) -> ::std::os::raw::c_int;
 }

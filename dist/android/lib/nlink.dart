@@ -22,7 +22,7 @@ typedef _OpenAndroidNative = Int32 Function(
   Int32 fd,
   Uint8 epIn,
   Uint8 epOut,
-  Uint8 isCx2,
+  Uint16 product,
   Pointer<NLinkString> json,
   Pointer<NLinkString> err,
 );
@@ -30,7 +30,7 @@ typedef _OpenAndroidDart = int Function(
   int fd,
   int epIn,
   int epOut,
-  int isCx2,
+  int product,
   Pointer<NLinkString> json,
   Pointer<NLinkString> err,
 );
@@ -169,9 +169,47 @@ typedef _ShotDart = int Function(
 typedef _ProgressGetNative = Void Function(Pointer<Uint64> done, Pointer<Uint64> total);
 typedef _ProgressGetDart = void Function(Pointer<Uint64> done, Pointer<Uint64> total);
 
+typedef _BackupNative = Int32 Function(
+  Uint8 bus,
+  Uint8 addr,
+  Pointer<Utf8> dest,
+  Pointer<Void> cb,
+  Pointer<Void> user,
+  Pointer<NLinkString> err,
+);
+typedef _BackupDart = int Function(
+  int bus,
+  int addr,
+  Pointer<Utf8> dest,
+  Pointer<Void> cb,
+  Pointer<Void> user,
+  Pointer<NLinkString> err,
+);
+
+typedef _RomDumpNative = Int32 Function(
+  Int32 fd,
+  Uint8 epIn,
+  Uint8 epOut,
+  Pointer<Utf8> dest,
+  Pointer<Void> cb,
+  Pointer<Void> user,
+  Pointer<NLinkString> err,
+);
+typedef _RomDumpDart = int Function(
+  int fd,
+  int epIn,
+  int epOut,
+  Pointer<Utf8> dest,
+  Pointer<Void> cb,
+  Pointer<Void> user,
+  Pointer<NLinkString> err,
+);
+
 class Nlink {
   Nlink._(DynamicLibrary lib)
-      : _openAndroid = lib.lookupFunction<_OpenAndroidNative, _OpenAndroidDart>('nlink_open_android'),
+      : _openAndroid = lib.lookupFunction<_OpenAndroidNative, _OpenAndroidDart>(
+          'nlink_open_android_product',
+        ),
         _close = lib.lookupFunction<_ErrFnNative, _ErrFnDart>('nlink_close'),
         _info = lib.lookupFunction<_StrFnNative, _StrFnDart>('nlink_info'),
         _listDir = lib.lookupFunction<_PathFnNative, _PathFnDart>('nlink_list_dir'),
@@ -183,7 +221,10 @@ class Nlink {
         _downloadDir = lib.lookupFunction<_DlDirNative, _DlDirDart>('nlink_download_dir'),
         _upload = lib.lookupFunction<_UlNative, _UlDart>('nlink_upload_file'),
         _screenshot = lib.lookupFunction<_ShotNative, _ShotDart>('nlink_screenshot'),
+        _viewFrame = lib.lookupFunction<_ShotNative, _ShotDart>('nlink_view_frame'),
         _exitExam = lib.lookupFunction<_ErrFnNative, _ErrFnDart>('nlink_exit_exam_mode'),
+        _backup = lib.lookupFunction<_BackupNative, _BackupDart>('nlink_backup'),
+        _romDump = lib.lookupFunction<_RomDumpNative, _RomDumpDart>('nlink_rom_dump_android'),
         _progressGet = lib.lookupFunction<_ProgressGetNative, _ProgressGetDart>('nlink_progress_get'),
         _freeString = lib.lookupFunction<Void Function(NLinkString), void Function(NLinkString)>(
           'nlink_string_free',
@@ -208,7 +249,10 @@ class Nlink {
   final _DlDirDart _downloadDir;
   final _UlDart _upload;
   final _ShotDart _screenshot;
+  final _ShotDart _viewFrame;
   final _ErrFnDart _exitExam;
+  final _BackupDart _backup;
+  final _RomDumpDart _romDump;
   final _ProgressGetDart _progressGet;
   final void Function(NLinkString) _freeString;
   final void Function(NLinkImage) _freeImage;
@@ -244,12 +288,12 @@ class Nlink {
     required int fd,
     required int epIn,
     required int epOut,
-    required bool isCx2,
+    required int productId,
   }) {
     final json = calloc<NLinkString>();
     final err = calloc<NLinkString>();
     try {
-      final rc = _openAndroid(fd, epIn, epOut, isCx2 ? 1 : 0, json, err);
+      final rc = _openAndroid(fd, epIn, epOut, productId, json, err);
       _check(rc, err);
       return _take(json);
     } finally {
@@ -366,6 +410,33 @@ class Nlink {
     }
   }
 
+  void backup(String dest) {
+    final err = calloc<NLinkString>();
+    final cdest = dest.toNativeUtf8();
+    try {
+      _check(_backup(0, 0, cdest, nullptr, nullptr, err), err);
+    } finally {
+      calloc.free(err);
+      malloc.free(cdest);
+    }
+  }
+
+  void romDump({
+    required int fd,
+    required int epIn,
+    required int epOut,
+    required String dest,
+  }) {
+    final err = calloc<NLinkString>();
+    final cdest = dest.toNativeUtf8();
+    try {
+      _check(_romDump(fd, epIn, epOut, cdest, nullptr, nullptr, err), err);
+    } finally {
+      calloc.free(err);
+      malloc.free(cdest);
+    }
+  }
+
   void exitExam() {
     final err = calloc<NLinkString>();
     try {
@@ -380,6 +451,23 @@ class Nlink {
     final err = calloc<NLinkString>();
     try {
       _check(_screenshot(0, 0, img, err), err);
+      final w = img.ref.width;
+      final h = img.ref.height;
+      final stride = img.ref.stride;
+      final bytes = img.ref.rgba.asTypedList(stride * h).toList();
+      _freeImage(img.ref);
+      return (width: w, height: h, rgba: bytes);
+    } finally {
+      calloc.free(img);
+      calloc.free(err);
+    }
+  }
+
+  ({int width, int height, List<int> rgba}) viewFrame() {
+    final img = calloc<NLinkImage>();
+    final err = calloc<NLinkString>();
+    try {
+      _check(_viewFrame(0, 0, img, err), err);
       final w = img.ref.width;
       final h = img.ref.height;
       final stride = img.ref.stride;

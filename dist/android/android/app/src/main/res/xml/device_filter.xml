@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- TI-Nspire (0451:e012) and CX II (0451:e022) -->
+    <!-- 0451:e001 SilverLink, e003 84+, e008 84+SE/CSE/CE, e012 Nspire, e018 Evo, e022 CX II -->
+    <usb-device vendor-id="1105" product-id="57345" />
+    <usb-device vendor-id="1105" product-id="57347" />
+    <usb-device vendor-id="1105" product-id="57352" />
     <usb-device vendor-id="1105" product-id="57362" />
+    <usb-device vendor-id="1105" product-id="57368" />
     <usb-device vendor-id="1105" product-id="57378" />
 </resources>

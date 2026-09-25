@@ -480,8 +480,6 @@ dependencies = [
 [[package]]
 name = "libnspire"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6428b72ef81134d34d077748639ae280cf8b5b3314ae99fa8ff1e34cbc1d64b"
 dependencies = [
  "array_iterator",
  "displaydoc",

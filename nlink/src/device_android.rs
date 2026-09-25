@@ -141,6 +141,7 @@ fn info_to_json(info: &nspire_devinfo, is_cx2: bool) -> serde_json::Value {
     "free_ram": info.ram.free,
     "total_ram": info.ram.total,
     "clock_speed": info.clock_speed,
+    "family": "nspire",
     "is_cx_ii": is_cx2,
     "version": {
       "major": v.major,
@@ -151,7 +152,20 @@ fn info_to_json(info: &nspire_devinfo, is_cx2: bool) -> serde_json::Value {
   })
 }
 
-pub fn close(_bus: u8, _addr: u8) -> Result<()> {
+pub fn open_android_product(fd: i32, ep_in: u8, ep_out: u8, product: u16) -> Result<serde_json::Value> {
+  if product == 0xe012 || product == 0xe022 {
+    return open_android(fd, ep_in, ep_out, product == 0xe022);
+  }
+  crate::link::close(0, 0);
+  if let Some(old) = session().lock().unwrap().take() {
+    unsafe { nspire_free(old.handle) };
+  }
+  nsp_err(unsafe { nspire_android_setup(fd, ep_in, ep_out) })?;
+  crate::link::open_fd(ep_in, ep_out, product)
+}
+
+pub fn close(bus: u8, addr: u8) -> Result<()> {
+  crate::link::close(bus, addr);
   if let Some(sess) = session().lock().unwrap().take() {
     unsafe { nspire_free(sess.handle) };
   }
@@ -166,7 +180,10 @@ pub fn info(_bus: u8, _addr: u8) -> Result<serde_json::Value> {
   })
 }
 
-pub fn list_dir(_bus: u8, _addr: u8, path: &str) -> Result<Vec<FileInfo>> {
+pub fn list_dir(bus: u8, addr: u8, path: &str) -> Result<Vec<FileInfo>> {
+  if let Some(entries) = crate::link::list_dir(bus, addr, path) {
+    return entries;
+  }
   let path = if path.is_empty() { "/" } else { path };
   let cpath = CString::new(path)?;
   with_handle(|h| {
@@ -195,13 +212,17 @@ pub fn list_dir(_bus: u8, _addr: u8, path: &str) -> Result<Vec<FileInfo>> {
 }
 
 pub fn download_file(
-  _bus: u8,
-  _addr: u8,
+  bus: u8,
+  addr: u8,
   remote: &str,
   size: u64,
   dest_dir: &Path,
   progress: &mut dyn FnMut(usize),
 ) -> Result<()> {
+  if let Some(done) = crate::link::download_file(bus, addr, remote, dest_dir) {
+    progress(0);
+    return done;
+  }
   if size > MAX_FILE_SIZE {
     return Err(format!("File is {size} bytes, which exceeds the safety limit.").into());
   }
@@ -276,12 +297,16 @@ pub fn download_dir(
 }
 
 pub fn upload_file(
-  _bus: u8,
-  _addr: u8,
+  bus: u8,
+  addr: u8,
   dest_dir: &str,
   src: &Path,
   progress: &mut dyn FnMut(usize),
 ) -> Result<()> {
+  if let Some(done) = crate::link::upload_file(bus, addr, dest_dir, src) {
+    progress(0);
+    return done;
+  }
   let mut buf = vec![];
   File::open(src)?.read_to_end(&mut buf)?;
   let name = src
@@ -308,39 +333,57 @@ pub fn upload_file(
   })
 }
 
-pub fn mkdir(_bus: u8, _addr: u8, path: &str) -> Result<()> {
+pub fn mkdir(bus: u8, addr: u8, path: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let cpath = CString::new(path)?;
   with_handle(|h| nsp_err(unsafe { nspire_dir_create(h, cpath.as_ptr()) }))
 }
 
-pub fn rm(_bus: u8, _addr: u8, path: &str) -> Result<()> {
+pub fn rm(bus: u8, addr: u8, path: &str) -> Result<()> {
+  if let Some(done) = crate::link::remove(bus, addr, path) {
+    return done;
+  }
   let cpath = CString::new(path)?;
   with_handle(|h| nsp_err(unsafe { nspire_file_delete(h, cpath.as_ptr()) }))
 }
 
-pub fn rmdir(_bus: u8, _addr: u8, path: &str) -> Result<()> {
+pub fn rmdir(bus: u8, addr: u8, path: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let cpath = CString::new(path)?;
   with_handle(|h| nsp_err(unsafe { nspire_dir_delete(h, cpath.as_ptr()) }))
 }
 
-pub fn move_file(_bus: u8, _addr: u8, src: &str, dest: &str) -> Result<()> {
+pub fn move_file(bus: u8, addr: u8, src: &str, dest: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let csrc = CString::new(src)?;
   let cdst = CString::new(dest)?;
   with_handle(|h| nsp_err(unsafe { nspire_file_move(h, csrc.as_ptr(), cdst.as_ptr()) }))
 }
 
-pub fn copy_file(_bus: u8, _addr: u8, src: &str, dest: &str) -> Result<()> {
+pub fn copy_file(bus: u8, addr: u8, src: &str, dest: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let csrc = CString::new(src)?;
   let cdst = CString::new(dest)?;
   with_handle(|h| nsp_err(unsafe { nspire_file_copy(h, csrc.as_ptr(), cdst.as_ptr()) }))
 }
 
 pub fn upload_os(
-  _bus: u8,
-  _addr: u8,
+  bus: u8,
+  addr: u8,
   src: &Path,
   progress: &mut dyn FnMut(usize),
 ) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let mut buf = vec![];
   File::open(src)?.read_to_end(&mut buf)?;
   crate::progress::reset(buf.len() as u64);
@@ -361,12 +404,32 @@ pub fn upload_os(
 }
 
 pub fn backup(
-  _bus: u8,
-  _addr: u8,
-  _dest: &Path,
-  _progress: &mut dyn FnMut(usize),
+  bus: u8,
+  addr: u8,
+  dest: &Path,
+  progress: &mut dyn FnMut(usize),
 ) -> Result<()> {
+  if let Some(done) = crate::link::backup(bus, addr, dest, progress) {
+    return done;
+  }
   Err("Backup is not available in the Android build yet.".into())
+}
+
+pub fn rom_dump(
+  fd: i32,
+  ep_in: u8,
+  ep_out: u8,
+  dest: &Path,
+  progress: &mut dyn FnMut(usize),
+) -> Result<()> {
+  crate::link::close(0, 0);
+  if let Some(old) = session().lock().unwrap().take() {
+    unsafe { nspire_free(old.handle) };
+  }
+  nsp_err(unsafe { nspire_android_setup(fd, ep_in, ep_out) })?;
+  crate::link::rom_dump_endpoints(ep_in, ep_out, dest)?;
+  progress(0);
+  Ok(())
 }
 
 pub fn restore(
@@ -401,7 +464,10 @@ fn rgb565le_to_rgba(data: &[u8], pixels: usize) -> Vec<u8> {
   out
 }
 
-pub fn screenshot(_bus: u8, _addr: u8) -> Result<Screenshot> {
+pub fn screenshot(bus: u8, addr: u8) -> Result<Screenshot> {
+  if let Some(shot) = crate::link::screenshot(bus, addr) {
+    return shot.map(|(width, height, rgba)| Screenshot { width, height, rgba });
+  }
   with_handle(|h| {
     let mut image: *mut nspire_image = ptr::null_mut();
     nsp_err(unsafe { nspire_screenshot(h, &mut image) })?;
@@ -428,6 +494,16 @@ pub fn screenshot(_bus: u8, _addr: u8) -> Result<Screenshot> {
   })
 }
 
+pub fn view_frame(_bus: u8, _addr: u8) -> Result<Screenshot> {
+  if crate::link::connected(0, 0) {
+    return Err("Live view is only available on a TI-Nspire running nlink-view.".into());
+  }
+  with_handle(|handle| {
+    let (width, height, rgba) = crate::viewframe::pull_frame(handle)?;
+    Ok(Screenshot { width, height, rgba })
+  })
+}
+
 pub fn screenshot_png(bus: u8, addr: u8, dest: &Path) -> Result<()> {
   let shot = screenshot(bus, addr)?;
   let file = File::create(dest)?;
@@ -446,7 +522,10 @@ pub fn screenshot_png(bus: u8, addr: u8, dest: &Path) -> Result<()> {
 const EXIT_TEST_MODE_TNS: &[u8] = include_bytes!("exit_test_mode.tns");
 const EXIT_TEST_MODE_PATH: &str = "/Press-to-Test/Exit Test Mode.tns";
 
-pub fn exit_exam_mode(_bus: u8, _addr: u8) -> Result<()> {
+pub fn exit_exam_mode(bus: u8, addr: u8) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let entries = list_dir(0, 0, "/")?;
   if !entries.iter().any(|e| e.is_dir && e.path == "Press-to-Test") {
     return Err("Calculator does not appear to be in exam mode (no Press-to-Test folder).".into());

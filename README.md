@@ -1,6 +1,8 @@
 # nlink-ng
 
-Native Qt 6 linking program for the TI-Nspire (CX-II included).
+Native Qt 6 linking program for TI-Nspire, TI-83/84 (USB and SilverLink), TI-84 Plus CE, and TI-84 Evo.
+
+83/84, CE, and Evo transfers follow the published link protocols. They have not been verified against a physical calculator in this tree. Nspire behavior is unchanged.
 
 USB protocol code is Rust (`nlink/`). The GUI is Qt Widgets (`qt/`). The same `n-link` binary is the CLI.
 

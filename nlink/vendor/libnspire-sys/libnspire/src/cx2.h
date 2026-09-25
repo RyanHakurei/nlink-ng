@@ -35,6 +35,9 @@ int packet_recv_cx2(struct nspire_handle *handle, char *data, int size);
 // Send a NavNet packet wrapped in the NavNet SE protocol and wait for an ack.
 // Takes care of the handshake and other NNSE stuff like acking.
 int packet_send_cx2(struct nspire_handle *handle, char *data, int size);
+/* Queue a packet and return without waiting. The view service answers
+ * from inside the calculator's receive path, so waiting here deadlocks. */
+int packet_send_cx2_nowait(struct nspire_handle *handle, char *data, int size);
 
 #ifdef __cplusplus
 }

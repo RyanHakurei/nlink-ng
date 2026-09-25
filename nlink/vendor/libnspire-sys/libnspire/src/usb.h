@@ -32,8 +32,11 @@ extern "C" {
 typedef struct {
 	libusb_device_handle *dev;
 	unsigned char ep_in, ep_out;
+	int recover;
 } usb_device_t;
 
+void nspire_set_io_timeout(unsigned int ms);
+unsigned int nspire_io_timeout(void);
 int usb_init();
 void usb_finish();
 int usb_get_device(usb_device_t *handle, libusb_device_handle *dev);

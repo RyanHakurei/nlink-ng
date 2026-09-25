@@ -139,6 +139,16 @@ int packet_send(nspire_handle_t *h, struct packet p) {
 		return usb_write(&h->device, (char*)&p, size);
 }
 
+int packet_send_nowait(nspire_handle_t *h, struct packet p) {
+	int size = HEADER_SIZE + packet_fulldatasize(&p);
+
+	finalize_packet(&p);
+	if(h->is_cx2)
+		return packet_send_cx2_nowait(h, (char*)&p, size);
+	else
+		return usb_write(&h->device, (char*)&p, size);
+}
+
 int packet_recv(nspire_handle_t *h, struct packet *p) {
 	int ret;
 	struct packet unused;

@@ -1,6 +1,7 @@
 use globwalk::DirEntry;
 
 fn main() {
+    println!("cargo:rerun-if-changed=libnspire/src");
     let files = globwalk::GlobWalkerBuilder::from_patterns("libnspire/src", &["*.{c,cpp}"])
         .build()
         .unwrap()

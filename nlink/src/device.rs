@@ -18,8 +18,14 @@ pub struct ListedDevice {
   pub bus_number: u8,
   pub address: u8,
   pub name: String,
+  pub family: String,
   pub is_cx_ii: bool,
   pub needs_drivers: bool,
+}
+
+pub enum Opened {
+  Nspire(libnspire::info::Info),
+  Link(serde_json::Value),
 }
 
 #[derive(Serialize, Clone)]
@@ -46,26 +52,28 @@ pub struct Device {
 pub static DEVICES: std::sync::LazyLock<RwLock<HashMap<(u8, u8), Device>>> =
   std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
-fn is_nspire(dev: &rusb::Device<GlobalContext>) -> rusb::Result<bool> {
-  let descriptor = dev.device_descriptor()?;
-  Ok(descriptor.vendor_id() == VID && matches!(descriptor.product_id(), PID | PID_CX2))
-}
-
-fn display_name(dev: &rusb::Device<GlobalContext>) -> String {
-  match dev.device_descriptor() {
-    Ok(d) if d.product_id() == PID_CX2 => "TI-Nspire CX II".to_string(),
-    _ => "TI-Nspire".to_string(),
+fn ti_kind(pid: u16) -> Option<(&'static str, &'static str)> {
+  match pid {
+    PID => Some(("nspire", "TI-Nspire")),
+    PID_CX2 => Some(("nspire", "TI-Nspire CX II")),
+    0xe001 => Some(("silverlink", "SilverLink")),
+    0xe003 => Some(("dusb", "TI-84 Plus")),
+    0xe008 => Some(("dusb", "TI-84 Plus / CE")),
+    0xe018 => Some(("evo", "TI-84 Evo")),
+    _ => None,
   }
 }
 
 fn add_device(dev: Arc<rusb::Device<GlobalContext>>) -> rusb::Result<((u8, u8), Device)> {
-  if !is_nspire(&dev)? {
+  let descriptor = dev.device_descriptor()?;
+  if descriptor.vendor_id() != VID || ti_kind(descriptor.product_id()).is_none() {
     return Err(rusb::Error::Other);
   }
+  let name = ti_kind(descriptor.product_id()).unwrap().1.to_string();
   Ok((
     (dev.bus_number(), dev.address()),
     Device {
-      name: display_name(&dev),
+      name,
       device: dev,
       state: DeviceState::Closed,
       needs_drivers: false,
@@ -90,15 +98,14 @@ pub fn enumerate() -> Result<Vec<ListedDevice>> {
       }
     }
     if let Some(device) = map.get(&key) {
+      let pid = device.device.device_descriptor().map(|d| d.product_id()).unwrap_or(0);
+      let (family, _) = ti_kind(pid).unwrap_or(("nspire", "TI-Nspire"));
       listed.push(ListedDevice {
         bus_number: key.0,
         address: key.1,
         name: device.name.clone(),
-        is_cx_ii: device
-          .device
-          .device_descriptor()
-          .map(|d| d.product_id() == PID_CX2)
-          .unwrap_or(false),
+        family: family.to_string(),
+        is_cx_ii: pid == PID_CX2,
         needs_drivers: device.needs_drivers,
       });
     }
@@ -138,26 +145,36 @@ fn open_handle(usb: rusb::Device<GlobalContext>) -> Result<(libnspire::Handle<Gl
   Err(last_err.unwrap_or_else(|| NlinkError::from("Failed to open calculator")))
 }
 
-pub fn open(bus: u8, addr: u8) -> Result<libnspire::info::Info> {
+pub fn open(bus: u8, addr: u8) -> Result<Opened> {
+  if crate::link::connected(bus, addr) {
+    let info = crate::link::info_value(bus, addr).unwrap_or_else(|| Err("calculator session lost".into()))?;
+    return Ok(Opened::Link(info));
+  }
   {
     let map = DEVICES.read().unwrap();
     if let Some(device) = map.get(&(bus, addr)) {
       if let DeviceState::Open(_, info) = &device.state {
-        return Ok(info.clone());
+        return Ok(Opened::Nspire(info.clone()));
       }
     }
   }
   let usb = find_usb(bus, addr)?;
+  let pid = usb.device_descriptor()?.product_id();
+  if !matches!(pid, PID | PID_CX2) {
+    let info = crate::link::open_usb(bus, addr, usb, pid)?;
+    return Ok(Opened::Link(info));
+  }
   let (handle, info) = open_handle(usb)?;
   let mut map = DEVICES.write().unwrap();
   let device = map
     .get_mut(&(bus, addr))
     .ok_or_else(|| NlinkError::from("Device lost"))?;
   device.state = DeviceState::Open(Arc::new(Mutex::new(handle)), info.clone());
-  Ok(info)
+  Ok(Opened::Nspire(info))
 }
 
 pub fn close(bus: u8, addr: u8) -> Result<()> {
+  crate::link::close(bus, addr);
   let mut map = DEVICES.write().unwrap();
   let device = map
     .get_mut(&(bus, addr))
@@ -221,6 +238,9 @@ fn gray8_to_rgba(data: &[u8], pixels: usize) -> Vec<u8> {
 }
 
 pub fn screenshot(bus: u8, addr: u8) -> Result<Screenshot> {
+  if let Some(shot) = crate::link::screenshot(bus, addr) {
+    return shot.map(|(width, height, rgba)| Screenshot { width, height, rgba });
+  }
   with_handle(bus, addr, |h| {
     let img = h.screenshot()?;
     let pixels = img.width as usize * img.height as usize;
@@ -241,6 +261,16 @@ pub fn screenshot(bus: u8, addr: u8) -> Result<Screenshot> {
       height: img.height,
       rgba,
     })
+  })
+}
+
+pub fn view_frame(bus: u8, addr: u8) -> Result<Screenshot> {
+  if crate::link::connected(bus, addr) {
+    return Err("Live view is only available on a TI-Nspire running nlink-view.".into());
+  }
+  with_handle(bus, addr, |handle| {
+    let (width, height, rgba) = crate::viewframe::pull_frame(handle.as_raw())?;
+    Ok(Screenshot { width, height, rgba })
   })
 }
 
@@ -346,6 +376,9 @@ pub fn detect_ndless(bus: u8, addr: u8) -> Option<String> {
 }
 
 pub fn list_dir(bus: u8, addr: u8, path: &str) -> Result<Vec<FileInfo>> {
+  if let Some(entries) = crate::link::list_dir(bus, addr, path) {
+    return entries;
+  }
   let path = if path.is_empty() { "/" } else { path };
   with_handle(bus, addr, |h| {
     let dir = h.list_dir(path)?;
@@ -371,6 +404,10 @@ pub fn download_file(
   dest_dir: &Path,
   progress: &mut dyn FnMut(usize),
 ) -> Result<()> {
+  if let Some(done) = crate::link::download_file(bus, addr, remote, dest_dir) {
+    progress(0);
+    return done;
+  }
   if size > MAX_FILE_SIZE {
     return Err(format!(
       "File is {} bytes, which exceeds the {} byte safety limit. This can indicate a corrupted directory entry.",
@@ -432,6 +469,10 @@ pub fn upload_file(
   src: &Path,
   progress: &mut dyn FnMut(usize),
 ) -> Result<()> {
+  if let Some(done) = crate::link::upload_file(bus, addr, dest_dir, src) {
+    progress(0);
+    return done;
+  }
   let mut buf = vec![];
   File::open(src)?.read_to_end(&mut buf)?;
   if buf.len() as u64 > MAX_FILE_SIZE {
@@ -460,6 +501,9 @@ const EXIT_TEST_MODE_PATH: &str = "/Press-to-Test/Exit Test Mode.tns";
 /// Upload TI's "Exit Test Mode.tns" into Press-to-Test. The handheld reboots
 /// out of exam/Press-to-Test if that folder is present.
 pub fn exit_exam_mode(bus: u8, addr: u8) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   with_handle(bus, addr, |h| {
     let dir = h.list_dir("/")?;
     let in_exam = dir.iter().any(|file| {
@@ -480,6 +524,9 @@ pub fn exit_exam_mode(bus: u8, addr: u8) -> Result<()> {
 }
 
 pub fn mkdir(bus: u8, addr: u8, path: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   with_handle(bus, addr, |h| {
     h.create_dir(path)?;
     Ok(())
@@ -487,6 +534,9 @@ pub fn mkdir(bus: u8, addr: u8, path: &str) -> Result<()> {
 }
 
 pub fn rm(bus: u8, addr: u8, path: &str) -> Result<()> {
+  if let Some(done) = crate::link::remove(bus, addr, path) {
+    return done;
+  }
   with_handle(bus, addr, |h| {
     h.delete_file(path)?;
     Ok(())
@@ -494,6 +544,9 @@ pub fn rm(bus: u8, addr: u8, path: &str) -> Result<()> {
 }
 
 pub fn rmdir(bus: u8, addr: u8, path: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   with_handle(bus, addr, |h| {
     h.delete_dir(path)?;
     Ok(())
@@ -501,6 +554,9 @@ pub fn rmdir(bus: u8, addr: u8, path: &str) -> Result<()> {
 }
 
 pub fn move_file(bus: u8, addr: u8, src: &str, dest: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   with_handle(bus, addr, |h| {
     h.move_file(src, dest)?;
     Ok(())
@@ -508,6 +564,9 @@ pub fn move_file(bus: u8, addr: u8, src: &str, dest: &str) -> Result<()> {
 }
 
 pub fn copy_file(bus: u8, addr: u8, src: &str, dest: &str) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   with_handle(bus, addr, |h| {
     h.copy_file(src, dest)?;
     Ok(())
@@ -515,6 +574,9 @@ pub fn copy_file(bus: u8, addr: u8, src: &str, dest: &str) -> Result<()> {
 }
 
 pub fn upload_os(bus: u8, addr: u8, src: &Path, progress: &mut dyn FnMut(usize)) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let mut buf = vec![];
   File::open(src)?.read_to_end(&mut buf)?;
   with_handle(bus, addr, move |h| {
@@ -621,6 +683,9 @@ fn ensure_dir(bus: u8, addr: u8, path: &str) -> Result<()> {
 
 /// Backup the calculator filesystem to a `.tar.gz`. Skips `NspireLogs.zip`.
 pub fn backup(bus: u8, addr: u8, dest: &Path, progress: &mut dyn FnMut(usize)) -> Result<()> {
+  if let Some(done) = crate::link::backup(bus, addr, dest, progress) {
+    return done;
+  }
   let mut tree = Vec::new();
   collect_tree(bus, addr, "/", &mut tree)?;
   let file = File::create(dest)?;
@@ -672,7 +737,24 @@ pub fn backup(bus: u8, addr: u8, dest: &Path, progress: &mut dyn FnMut(usize)) -
 }
 
 /// Restore files from a `.tar.gz` created by [`backup`]. Existing files may be overwritten.
+pub fn rom_dump(bus: u8, addr: u8, dest: &Path, progress: &mut dyn FnMut(usize)) -> Result<()> {
+  crate::link::close(bus, addr);
+  let usb = find_usb(bus, addr)?;
+  let pid = usb.device_descriptor()?.product_id();
+  if !matches!(pid, 0xe003 | 0xe008) {
+    return Err(NlinkError::from(
+      "ROM dump only works on a TI-84 Plus or Silver Edition. The CE and Evo cannot dump a ROM this way.",
+    ));
+  }
+  crate::link::rom_dump_device(usb, dest)?;
+  progress(0);
+  Ok(())
+}
+
 pub fn restore(bus: u8, addr: u8, src: &Path, progress: &mut dyn FnMut(usize)) -> Result<()> {
+  if let Some(err) = crate::link::unsupported(bus, addr) {
+    return Err(err);
+  }
   let file = File::open(src)?;
   let decoder = flate2::read::GzDecoder::new(file);
   let mut archive = tar::Archive::new(decoder);

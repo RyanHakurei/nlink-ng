@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -99,7 +100,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? _info;
   String _path = '/';
   List<CalcFile> _files = [];
-  String _status = 'Connect a TI-Nspire over USB-OTG.';
+  String _status = 'Connect a TI calculator over USB.';
   bool _busy = false;
   bool _connected = false;
   double? _transferProgress;
@@ -151,8 +152,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (!_connected) {
           final n = _devices.where((d) => d.isNspire).length;
           _status = n == 0
-              ? 'No TI-Nspire on USB.'
-              : 'Found $n Nspire. Grant USB permission, then Connect.';
+              ? 'No TI calculator on USB.'
+              : 'Found $n calculator${n == 1 ? '' : 's'}. Grant USB permission, then Connect.';
         }
       });
     } catch (e) {
@@ -196,7 +197,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           fd: raw['fd'] as int,
           epIn: raw['epIn'] as int,
           epOut: raw['epOut'] as int,
-          isCx2: raw['isCx2'] as bool? ?? true,
+          productId: raw['productId'] as int? ?? d.productId,
         );
         if (!mounted) return;
         setState(() {
@@ -266,7 +267,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         });
       setState(() {
         _files = list;
-        _status = '${_info?['name'] ?? 'Nspire'}  ·  $_path  ·  ${list.length} items';
+        final note = _nspire ? '' : '  ·  not verified on hardware';
+        _status = '${_info?['name'] ?? 'Calculator'}  ·  $_path  ·  ${list.length} items$note';
       });
     } catch (e) {
       setState(() => _status = 'List failed: $e');
@@ -293,6 +295,126 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  bool get _nspire => (_info?['family'] as String? ?? 'nspire') == 'nspire';
+
+  bool get _silverlink => (_info?['family'] as String? ?? '') == 'silverlink';
+
+  bool get _z80Backup {
+    final name = (_info?['name'] as String? ?? '').toLowerCase();
+    final family = _info?['family'] as String? ?? '';
+    return family == 'silverlink' || (family == 'dusb' && !name.contains('ce'));
+  }
+
+  bool get _canRomDump {
+    final name = (_info?['name'] as String? ?? '').toLowerCase();
+    final family = _info?['family'] as String? ?? '';
+    return family == 'dusb' && name.contains('84') && !name.contains('ce') && !name.contains('evo');
+  }
+
+  Widget _memoryPanel() {
+    final info = _info;
+    if (info == null) return const SizedBox.shrink();
+    final ramTotal = (info['total_ram'] as num?)?.toDouble() ?? 0;
+    final ramFree = (info['free_ram'] as num?)?.toDouble() ?? 0;
+    final flashTotal = (info['total_storage'] as num?)?.toDouble() ?? 0;
+    final flashFree = (info['free_storage'] as num?)?.toDouble() ?? 0;
+    final note = info['ram_note'] as String?;
+    final clock = info['clock'] as String?;
+    final battery = info['battery'] as String?;
+    if (ramTotal <= 0 && flashTotal <= 0 && note == null && clock == null && battery == null) {
+      return const SizedBox.shrink();
+    }
+    final ramUsed = (ramTotal - ramFree).clamp(0, ramTotal);
+    final flashUsed = (flashTotal - flashFree).clamp(0, flashTotal);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (battery != null || clock != null)
+            Text([
+              if (battery != null) 'Battery $battery',
+              if (clock != null) 'Clock $clock',
+            ].join('  ·  ')),
+          if (note != null || ramTotal > 0) ...[
+            const SizedBox(height: 8),
+            Text(note ?? 'RAM ${_fmtBytes(ramUsed.round())} / ${_fmtBytes(ramTotal.round())}'),
+            const SizedBox(height: 4),
+            LinearProgressIndicator(
+              value: note != null || ramTotal <= 0 ? 0 : (ramUsed / ramTotal).clamp(0.0, 1.0),
+            ),
+          ],
+          if (flashTotal > 0) ...[
+            const SizedBox(height: 8),
+            Text('Archive ${_fmtBytes(flashUsed.round())} / ${_fmtBytes(flashTotal.round())}'),
+            const SizedBox(height: 4),
+            LinearProgressIndicator(value: (flashUsed / flashTotal).clamp(0.0, 1.0)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _backupRam() async {
+    final name = _silverlink ? 'backup.8xb' : 'backup.8xg';
+    final uri = await _usb.invokeMethod<String>('pickSaveFile', {'name': name});
+    if (uri == null || uri.isEmpty) return;
+    final cache = await _usb.invokeMethod<String>('cacheDir');
+    if (cache == null || cache.isEmpty) return;
+    final dest = '$cache/${DateTime.now().millisecondsSinceEpoch}_$name';
+    try {
+      await _withTransfer('Backing up RAM', () async {
+        await _nlink!.backup(dest);
+        await _usb.invokeMethod('copyToUri', {'src': dest, 'uri': uri});
+      });
+      _snack('RAM backup saved');
+    } catch (e) {
+      _snack('$e');
+    }
+  }
+
+  Future<void> _romDump() async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('ROM dump'),
+        content: const Text(
+          'Run the USB ROM dumper on the TI-84 Plus or Silver Edition first. '
+          'The screen should say Dumping. This does not work on the CE or the Evo.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Continue')),
+        ],
+      ),
+    );
+    if (go != true) return;
+    final uri = await _usb.invokeMethod<String>('pickSaveFile', {'name': 'ti84.rom'});
+    if (uri == null || uri.isEmpty) return;
+    final link = await _usb.invokeMethod<Map<dynamic, dynamic>>('currentLink');
+    final cache = await _usb.invokeMethod<String>('cacheDir');
+    if (link == null || cache == null) {
+      _snack('Connect the calculator first');
+      return;
+    }
+    final dest = '$cache/${DateTime.now().millisecondsSinceEpoch}_ti84.rom';
+    try {
+      await _withTransfer('Dumping ROM', () async {
+        await _nlink!.romDump(
+          fd: link['fd'] as int,
+          epIn: link['epIn'] as int,
+          epOut: link['epOut'] as int,
+          dest: dest,
+        );
+        await _usb.invokeMethod('copyToUri', {'src': dest, 'uri': uri});
+      });
+      await _disconnect(userMessage: 'ROM dump saved. Restart the calculator, then connect again.');
+    } catch (e) {
+      _snack('$e');
+      await _disconnect(userMessage: 'ROM dump failed. Restart the calculator, then connect again.');
+    }
   }
 
   String _fmtBytes(int n) {
@@ -393,8 +515,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (uri == null || uri.isEmpty) return;
         await _withTransfer('Downloading ${f.name}', () async {
           await _nlink!.downloadFile(remote, f.size, dest);
+          final saved = Directory(dest)
+              .listSync()
+              .whereType<File>()
+              .toList();
+          if (saved.isEmpty) {
+            throw Exception('Download produced no file');
+          }
           await _usb.invokeMethod('copyToUri', {
-            'src': '$dest/${f.name}',
+            'src': saved.first.path,
             'uri': uri,
           });
         });
@@ -441,6 +570,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _reload();
     } catch (e) {
       _snack('$e');
+    }
+  }
+
+  Future<void> _liveView() async {
+    final worker = _nlink;
+    if (worker == null) return;
+    setState(() => _busy = true);
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => _LiveViewDialog(nlink: worker),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -533,16 +676,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 switch (v) {
                   case 'shot':
                     _screenshot();
+                  case 'live':
+                    _liveView();
+                  case 'backup':
+                    _backupRam();
+                  case 'rom':
+                    _romDump();
                   case 'exam':
                     _exitExam();
                   case 'disc':
                     _disconnect();
                 }
               },
-              itemBuilder: (ctx) => const [
-                PopupMenuItem(value: 'shot', child: Text('Screenshot')),
-                PopupMenuItem(value: 'exam', child: Text('Exit exam mode')),
-                PopupMenuItem(value: 'disc', child: Text('Disconnect')),
+              itemBuilder: (ctx) => [
+                const PopupMenuItem(value: 'shot', child: Text('Screenshot')),
+                if (_nspire) const PopupMenuItem(value: 'live', child: Text('Live view')),
+                if (_z80Backup) const PopupMenuItem(value: 'backup', child: Text('Backup RAM')),
+                if (_canRomDump) const PopupMenuItem(value: 'rom', child: Text('ROM dump')),
+                if (_nspire) const PopupMenuItem(value: 'exam', child: Text('Exit exam mode')),
+                const PopupMenuItem(value: 'disc', child: Text('Disconnect')),
               ],
             ),
         ],
@@ -551,13 +703,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                FloatingActionButton.small(
-                  heroTag: 'mkdir',
-                  onPressed: _busy ? null : _mkdir,
-                  tooltip: 'New folder',
-                  child: const Icon(Icons.create_new_folder),
-                ),
-                const SizedBox(height: 8),
+                if (_nspire) ...[
+                  FloatingActionButton.small(
+                    heroTag: 'mkdir',
+                    onPressed: _busy ? null : _mkdir,
+                    tooltip: 'New folder',
+                    child: const Icon(Icons.create_new_folder),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 FloatingActionButton(
                   heroTag: 'upload',
                   onPressed: _busy ? null : _upload,
@@ -572,9 +726,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           if (_busy) LinearProgressIndicator(value: _transferProgress),
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
             child: Text(_status),
           ),
+          if (_connected) _memoryPanel(),
           if (!_connected)
             Expanded(
               child: ListView(
@@ -648,6 +803,100 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
         ],
       ),
+    );
+  }
+}
+
+class _LiveViewDialog extends StatefulWidget {
+  const _LiveViewDialog({required this.nlink});
+
+  final NlinkWorker nlink;
+
+  @override
+  State<_LiveViewDialog> createState() => _LiveViewDialogState();
+}
+
+class _LiveViewDialogState extends State<_LiveViewDialog> {
+  ui.Image? _image;
+  String _status = 'Waiting for nlink-view on the calculator…';
+  bool _run = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _pump();
+  }
+
+  @override
+  void dispose() {
+    _run = false;
+    _image?.dispose();
+    _image = null;
+    super.dispose();
+  }
+
+  Future<void> _pump() async {
+    while (_run && mounted) {
+      final started = DateTime.now();
+      try {
+        final shot = await widget.nlink.screenshot();
+        if (!_run || !mounted) return;
+        final next = await _decodeFrame(shot.rgba, shot.width, shot.height);
+        if (!_run || !mounted) {
+          next.dispose();
+          return;
+        }
+        final previous = _image;
+        setState(() {
+          _image = next;
+          _status = 'Receiving';
+        });
+        previous?.dispose();
+      } catch (e) {
+        if (!_run || !mounted) return;
+        setState(() => _status = '$e');
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        continue;
+      }
+      final spent = DateTime.now().difference(started);
+      final rest = const Duration(milliseconds: 300) - spent;
+      if (_run && mounted && rest > Duration.zero) {
+        await Future<void>.delayed(rest);
+      }
+    }
+  }
+
+  Future<ui.Image> _decodeFrame(Uint8List rgba, int width, int height) {
+    final done = Completer<ui.Image>();
+    ui.decodeImageFromPixels(rgba, width, height, ui.PixelFormat.rgba8888, done.complete);
+    return done.future;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Live view'),
+      content: SizedBox(
+        width: 320,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Shows the calculator screen over the normal link. The keypad stays usable.',
+            ),
+            const SizedBox(height: 12),
+            if (_image != null)
+              RawImage(image: _image, scale: 0.5)
+            else
+              const SizedBox(width: 160, height: 120),
+            const SizedBox(height: 8),
+            Text(_status),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+      ],
     );
   }
 }

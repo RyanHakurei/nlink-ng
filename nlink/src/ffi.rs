@@ -75,11 +75,12 @@ fn fill_empty(p: *mut NLinkString) {
 #[cfg(not(target_os = "android"))]
 fn info_json(info: &libnspire::info::Info, bus: u8, addr: u8) -> std::result::Result<String, serde_json::Error> {
   let mut json = serde_json::to_string(info)?;
-  if let Some(ver) = device::detect_ndless(bus, addr) {
-    if let Ok(serde_json::Value::Object(mut obj)) = serde_json::from_str::<serde_json::Value>(&json) {
+  if let Ok(serde_json::Value::Object(mut obj)) = serde_json::from_str::<serde_json::Value>(&json) {
+    obj.insert("family".to_string(), serde_json::Value::String("nspire".into()));
+    if let Some(ver) = device::detect_ndless(bus, addr) {
       obj.insert("ndless".to_string(), serde_json::Value::String(ver));
-      json = serde_json::Value::Object(obj).to_string();
     }
+    json = serde_json::Value::Object(obj).to_string();
   }
   Ok(json)
 }
@@ -143,13 +144,17 @@ pub extern "C" fn nlink_open(
   }
   #[cfg(not(target_os = "android"))]
   match device::open(bus, addr) {
-    Ok(info) => match info_json(&info, bus, addr) {
+    Ok(device::Opened::Nspire(info)) => match info_json(&info, bus, addr) {
       Ok(json) => {
         fill_ok(out_json, &json);
         0
       }
       Err(e) => fill_err(out_err, e),
     },
+    Ok(device::Opened::Link(json)) => {
+      fill_ok(out_json, &json.to_string());
+      0
+    }
     Err(e) => fill_err(out_err, e),
   }
 }
@@ -181,6 +186,32 @@ pub extern "C" fn nlink_open_android(
 }
 
 #[no_mangle]
+pub extern "C" fn nlink_open_android_product(
+  fd: i32,
+  ep_in: u8,
+  ep_out: u8,
+  product: u16,
+  out_json: *mut NLinkString,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_json);
+  fill_empty(out_err);
+  #[cfg(not(target_os = "android"))]
+  {
+    let _ = (fd, ep_in, ep_out, product);
+    return fill_err(out_err, "nlink_open_android_product is only available on Android");
+  }
+  #[cfg(target_os = "android")]
+  match device::open_android_product(fd, ep_in, ep_out, product) {
+    Ok(json) => {
+      fill_ok(out_json, &json.to_string());
+      0
+    }
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
 pub extern "C" fn nlink_close(bus: u8, addr: u8, out_err: *mut NLinkString) -> c_int {
   fill_empty(out_err);
   match device::close(bus, addr) {
@@ -198,6 +229,15 @@ pub extern "C" fn nlink_info(
 ) -> c_int {
   fill_empty(out_json);
   fill_empty(out_err);
+  if let Some(result) = crate::link::info_value(bus, addr) {
+    return match result {
+      Ok(json) => {
+        fill_ok(out_json, &json.to_string());
+        0
+      }
+      Err(e) => fill_err(out_err, e),
+    };
+  }
   #[cfg(target_os = "android")]
   match device::info(bus, addr) {
     Ok(json) => {
@@ -467,6 +507,61 @@ pub extern "C" fn nlink_backup(
 }
 
 #[no_mangle]
+pub extern "C" fn nlink_rom_dump(
+  bus: u8,
+  addr: u8,
+  dest: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let dest = match cstr(dest) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  #[cfg(target_os = "android")]
+  {
+    let _ = (bus, addr, dest, progress, user);
+    return fill_err(out_err, "Use nlink_rom_dump_android on Android");
+  }
+  #[cfg(not(target_os = "android"))]
+  match device::rom_dump(bus, addr, &dest, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_rom_dump_android(
+  fd: i32,
+  ep_in: u8,
+  ep_out: u8,
+  dest: *const c_char,
+  cb: NLinkProgressCb,
+  user: *mut c_void,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  let dest = match cstr(dest) {
+    Ok(p) => PathBuf::from(p),
+    Err(e) => return fill_err(out_err, e),
+  };
+  let mut progress = progress_fn(cb, user);
+  #[cfg(not(target_os = "android"))]
+  {
+    let _ = (fd, ep_in, ep_out, dest, progress);
+    return fill_err(out_err, "nlink_rom_dump_android is only available on Android");
+  }
+  #[cfg(target_os = "android")]
+  match device::rom_dump(fd, ep_in, ep_out, &dest, &mut progress) {
+    Ok(()) => 0,
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
 pub extern "C" fn nlink_restore(
   bus: u8,
   addr: u8,
@@ -505,6 +600,11 @@ pub unsafe extern "C" fn nlink_image_free(img: NLinkImage) {
 }
 
 #[no_mangle]
+pub extern "C" fn nlink_set_io_timeout(ms: u32) {
+  unsafe { libnspire_sys::nspire_set_io_timeout(ms) }
+}
+
+#[no_mangle]
 pub extern "C" fn nlink_screenshot(
   bus: u8,
   addr: u8,
@@ -523,6 +623,47 @@ pub extern "C" fn nlink_screenshot(
     }
   }
   match device::screenshot(bus, addr) {
+    Ok(shot) => {
+      if !out.is_null() {
+        let width = shot.width as i32;
+        let height = shot.height as i32;
+        let stride = width * 4;
+        let boxed = shot.rgba.into_boxed_slice();
+        let ptr_rgba = Box::into_raw(boxed).cast::<u8>();
+        unsafe {
+          *out = NLinkImage {
+            rgba: ptr_rgba,
+            width,
+            height,
+            stride,
+          };
+        }
+      }
+      0
+    }
+    Err(e) => fill_err(out_err, e),
+  }
+}
+
+#[no_mangle]
+pub extern "C" fn nlink_view_frame(
+  bus: u8,
+  addr: u8,
+  out: *mut NLinkImage,
+  out_err: *mut NLinkString,
+) -> c_int {
+  fill_empty(out_err);
+  if !out.is_null() {
+    unsafe {
+      *out = NLinkImage {
+        rgba: ptr::null_mut(),
+        width: 0,
+        height: 0,
+        stride: 0,
+      };
+    }
+  }
+  match device::view_frame(bus, addr) {
     Ok(shot) => {
       if !out.is_null() {
         let width = shot.width as i32;
