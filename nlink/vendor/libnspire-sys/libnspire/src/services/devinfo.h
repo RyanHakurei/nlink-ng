@@ -19,7 +19,7 @@
 #define _DEVINFO_H
 
 #include "api/devinfo.h"
-#ifdef _WIN32
+#ifdef _MSC_VER
 #define PACK( ... ) __pragma( pack(push, 1) ) __VA_ARGS__ __pragma( pack(pop))
 #else
 #define PACK( ... ) __VA_ARGS__ __attribute__((__packed__))

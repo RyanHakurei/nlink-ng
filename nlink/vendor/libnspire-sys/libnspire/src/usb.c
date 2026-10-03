@@ -131,10 +131,13 @@ int usb_get_device(usb_device_t *handle, libusb_device_handle *dev) {
 	struct libusb_config_descriptor *config;
 	const struct libusb_interface_descriptor *iface;
 
+#ifndef _WIN32
+	/* WinUSB rejects set_configuration, and a reset drops the open handle. */
 	if (libusb_set_configuration(dev, NSP_DEFAULT_CONFIG))
 		goto error_close;
 	if (libusb_reset_device(dev))
 		goto error_close;
+#endif
 	if (libusb_claim_interface(dev, NSP_DEFAULT_IFACE))
 		goto error_close;
 

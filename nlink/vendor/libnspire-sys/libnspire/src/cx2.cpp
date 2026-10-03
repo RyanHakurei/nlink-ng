@@ -23,9 +23,11 @@
 
 #include "endianconv.h"
 #ifdef _WIN32
+#include <winsock2.h>
+#endif
+#ifdef _MSC_VER
 #include <sys/timeb.h>
 #include <sys/types.h>
-#include <winsock2.h>
 
 int gettimeofday(struct timeval *t, void *timezone) {
 	struct _timeb timebuffer;

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${NLINK_VERSION:-0.9.0}"
+VERSION="${NLINK_VERSION:-1.0.0}"
 BUILD="${ROOT}/qt/build"
 STAGE="${BUILD}/appimage"
 PLUGIN_FILTER="${STAGE}/qt-plugins"

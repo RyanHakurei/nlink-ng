@@ -49,6 +49,9 @@
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QPalette>
+#include <QPointer>
+#include <QStandardPaths>
+#include <QUuid>
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
@@ -59,7 +62,6 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QTableView>
-#include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
@@ -68,6 +70,8 @@
 #include <QtConcurrent>
 
 #include <atomic>
+#include <functional>
+#include <memory>
 
 namespace {
 
@@ -391,10 +395,55 @@ bool decodeNlinkItems(const QByteArray &bytes, QVector<CalcFile> *files, bool *c
   return files && !files->isEmpty();
 }
 
+struct DragProgressState {
+  std::function<void(qulonglong, qulonglong)> fn;
+};
+
+extern "C" void nlinkDragProgressThunk(void *user, uint64_t remaining, uint64_t total) {
+  auto *state = static_cast<DragProgressState *>(user);
+  if (state && state->fn)
+    state->fn(static_cast<qulonglong>(remaining), static_cast<qulonglong>(total));
+}
+
+QString dragOutRoot() {
+  return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
+         QStringLiteral("/drag-out");
+}
+
+// The file manager copies these after the drag has already finished, so the
+// folder has to outlive QDrag. Day-old folders are removed on the next launch.
+void sweepOldDragOuts() {
+  QDir root(dragOutRoot());
+  if (!root.exists())
+    return;
+  const QDateTime cutoff = QDateTime::currentDateTime().addDays(-1);
+  for (const QFileInfo &info : root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+    if (info.lastModified() < cutoff)
+      QDir(info.absoluteFilePath()).removeRecursively();
+  }
+}
+
+QString makeDragOutDir() {
+  const QString root = dragOutRoot();
+  QDir().mkpath(root);
+  const QString dir = root + QLatin1Char('/') + QUuid::createUuid().toString(QUuid::Id128);
+  QDir().mkpath(dir);
+  return dir;
+}
+
 class CalcMimeData : public QMimeData {
 public:
-  CalcMimeData(QVector<CalcFile> items, int bus, int addr)
-      : m_items(std::move(items)), m_bus(bus), m_addr(addr) {}
+  using FileFn = std::function<void(const QString &, int, int)>;
+  using ProgressFn = std::function<void(qulonglong, qulonglong)>;
+  using ErrorFn = std::function<void(const QString &)>;
+  using StartFn = std::function<void()>;
+  using RefuseFn = std::function<QString()>;
+
+  CalcMimeData(QVector<CalcFile> items, int bus, int addr, FileFn beginFile, ProgressFn progress,
+               ErrorFn error, StartFn started, RefuseFn refuse)
+      : m_items(std::move(items)), m_bus(bus), m_addr(addr), m_beginFile(std::move(beginFile)),
+        m_progress(std::move(progress)), m_error(std::move(error)), m_started(std::move(started)),
+        m_refuse(std::move(refuse)) {}
 
   bool hasFormat(const QString &mime) const override {
     if (mime == QLatin1String("text/uri-list"))
@@ -417,29 +466,54 @@ protected:
   }
 
 private:
+  void fail(const QString &message) const {
+    if (m_error && !message.isEmpty())
+      m_error(message);
+  }
+
   void prepareLocalFiles() const {
     if (m_prepared)
       return;
     m_prepared = true;
+    if (m_refuse) {
+      const QString why = m_refuse();
+      if (!why.isEmpty()) {
+        fail(why);
+        return;
+      }
+    }
+    if (m_started)
+      m_started();
+    m_dir = makeDragOutDir();
+    if (m_dir.isEmpty() || !QFileInfo::exists(m_dir)) {
+      fail(QStringLiteral("Could not create a folder for the download."));
+      return;
+    }
     QList<QUrl> urls;
-    for (const CalcFile &f : m_items) {
+    const int total = m_items.size();
+    for (int i = 0; i < total; ++i) {
+      const CalcFile &f = m_items.at(i);
+      if (m_beginFile)
+        m_beginFile(f.name, i + 1, total);
+      const QString local = m_dir + QLatin1Char('/') + f.name;
       NLinkString err{};
+      DragProgressState state{m_progress};
       int rc;
       if (f.isDir) {
-        const QString dest = m_tmp.filePath(f.name);
         rc = nlink_download_dir(static_cast<uint8_t>(m_bus), static_cast<uint8_t>(m_addr),
-                                f.path.toUtf8().constData(), dest.toUtf8().constData(), nullptr,
-                                nullptr, &err);
-        if (rc == 0)
-          urls.append(QUrl::fromLocalFile(dest));
+                                f.path.toUtf8().constData(), local.toUtf8().constData(),
+                                nlinkDragProgressThunk, &state, &err);
       } else {
         rc = nlink_download_file(static_cast<uint8_t>(m_bus), static_cast<uint8_t>(m_addr),
                                  f.path.toUtf8().constData(), static_cast<uint64_t>(f.size),
-                                 m_tmp.path().toUtf8().constData(), nullptr, nullptr, &err);
-        if (rc == 0)
-          urls.append(QUrl::fromLocalFile(m_tmp.filePath(f.name)));
+                                 m_dir.toUtf8().constData(), nlinkDragProgressThunk, &state, &err);
       }
-      takeString(err);
+      const QString message = takeString(err);
+      if (rc != 0 || !QFileInfo::exists(local)) {
+        fail(message.isEmpty() ? QStringLiteral("Could not download %1.").arg(f.name) : message);
+        continue;
+      }
+      urls.append(QUrl::fromLocalFile(local));
     }
     const_cast<CalcMimeData *>(this)->setUrls(urls);
   }
@@ -447,7 +521,12 @@ private:
   QVector<CalcFile> m_items;
   int m_bus = -1;
   int m_addr = -1;
-  mutable QTemporaryDir m_tmp;
+  mutable QString m_dir;
+  FileFn m_beginFile;
+  ProgressFn m_progress;
+  ErrorFn m_error;
+  StartFn m_started;
+  RefuseFn m_refuse;
   mutable bool m_prepared = false;
 };
 
@@ -490,6 +569,7 @@ private:
 };
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
+  sweepOldDragOuts();
   setWindowTitle("nlink-ng");
   resize(960, 640);
   buildUi();
@@ -1327,11 +1407,59 @@ void MainWindow::cutSelected() { placeOnClipboard(true); }
 
 void MainWindow::copySelected() { placeOnClipboard(false); }
 
+QMimeData *MainWindow::createOutgoingMime(const QVector<CalcFile> &files, QString *error,
+                                          bool *started) {
+  QPointer<MainWindow> self(this);
+  auto reported = std::make_shared<bool>(false);
+  auto beginFile = [self](const QString &name, int index, int count) {
+    if (!self)
+      return;
+    self->showQueueFile(QStringLiteral("Downloading"), name, index, count);
+    self->m_status->repaint();
+    self->m_transfer->repaint();
+    if (self->m_queueLabel->isVisible())
+      self->m_queueLabel->repaint();
+  };
+  auto progress = [self](qulonglong remaining, qulonglong total) {
+    if (!self)
+      return;
+    self->onProgress(remaining, total);
+    self->m_transfer->repaint();
+  };
+  auto onError = [self, error, reported](const QString &message) {
+    if (*reported || message.isEmpty())
+      return;
+    *reported = true;
+    if (error) {
+      *error = message;
+      return;
+    }
+    if (!self)
+      return;
+    QTimer::singleShot(0, self.data(), [self, message] {
+      if (self)
+        self->showError(message);
+    });
+  };
+  auto onStart = [started] {
+    if (started)
+      *started = true;
+  };
+  auto refuse = [self] {
+    if (!self || !self->hasDevice())
+      return QStringLiteral("No calculator is connected.");
+    if (self->m_busy)
+      return QStringLiteral("A transfer is already running.");
+    return QString();
+  };
+  return new CalcMimeData(files, m_bus, m_addr, beginFile, progress, onError, onStart, refuse);
+}
+
 void MainWindow::placeOnClipboard(bool cut) {
   const auto files = selectedFiles();
   if (files.isEmpty() || !hasDevice())
     return;
-  auto *mime = new CalcMimeData(files, m_bus, m_addr);
+  auto *mime = createOutgoingMime(files, nullptr, nullptr);
   mime->setData(kNlinkMime, encodeNlinkItems(files, cut, m_bus, m_addr));
   QApplication::clipboard()->setMimeData(mime);
   updateActions();
@@ -1385,15 +1513,23 @@ bool MainWindow::canAcceptCalcDrop(const QMimeData *mime) const {
 
 void MainWindow::startCalcDrag(QAbstractItemView *view, Qt::DropActions) {
   const auto files = selectedFiles();
-  if (files.isEmpty() || !hasDevice())
+  if (files.isEmpty() || !hasDevice() || m_busy)
     return;
-  auto *mime = new CalcMimeData(files, m_bus, m_addr);
+  QString error;
+  bool started = false;
+  auto *mime = createOutgoingMime(files, &error, &started);
   mime->setData(kNlinkMime, encodeNlinkItems(files, false, m_bus, m_addr));
   QDrag drag(view);
   drag.setMimeData(mime);
   const QIcon icon = fileIcon(files[0].name, files[0].isDir);
   drag.setPixmap(icon.pixmap(32, 32));
-  drag.exec(Qt::CopyAction | Qt::MoveAction, Qt::MoveAction);
+  drag.exec(Qt::CopyAction | Qt::MoveAction, Qt::CopyAction);
+  if (started)
+    hideTransferUi();
+  if (!error.isEmpty())
+    showError(error);
+  else if (started)
+    m_status->setText(QStringLiteral("Download complete"));
 }
 
 void MainWindow::calcDragEnter(QDragEnterEvent *event) {

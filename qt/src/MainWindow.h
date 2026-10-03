@@ -94,6 +94,7 @@ private:
   void downloadFilesTo(const QVector<CalcFile> &files, const QString &destDir);
   void moveOrCopyItems(const QVector<CalcFile> &files, const QString &destDir, bool copy);
   void startCalcDrag(QAbstractItemView *view, Qt::DropActions acts);
+  QMimeData *createOutgoingMime(const QVector<CalcFile> &files, QString *error, bool *started);
   void calcDragEnter(QDragEnterEvent *event);
   void calcDragMove(QAbstractItemView *view, QDragMoveEvent *event);
   void calcDrop(QAbstractItemView *view, QDropEvent *event);

@@ -3,6 +3,7 @@ Notes.md
 testing/
 nlink/target
 qt/build
+qt/build-windows/
 dist/*.AppImage
 dist/arch/src/
 dist/arch/pkg/

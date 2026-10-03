@@ -43,6 +43,16 @@ impl BulkIo for Pipe {
   }
 }
 
+impl BulkIo for Box<dyn BulkIo + Send> {
+  fn write_all(&mut self, data: &[u8]) -> Result<()> {
+    (**self).write_all(data)
+  }
+
+  fn read_some(&mut self, buf: &mut [u8]) -> Result<usize> {
+    (**self).read_some(buf)
+  }
+}
+
 pub struct ByteBuf {
   data: Vec<u8>,
 }

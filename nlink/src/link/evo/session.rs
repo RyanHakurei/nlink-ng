@@ -12,6 +12,16 @@ pub struct Calc<T: BulkIo> {
 }
 
 impl<T: BulkIo> Calc<T> {
+  pub fn map_io<U: BulkIo>(self, wrap: impl FnOnce(T) -> U) -> Calc<U> {
+    Calc {
+      io: wrap(self.io),
+      buffered: self.buffered,
+      model: self.model,
+      os_version: self.os_version,
+      vars: self.vars,
+    }
+  }
+
   pub fn handshake(io: T) -> Result<Self> {
     let mut calc = Self {
       io,

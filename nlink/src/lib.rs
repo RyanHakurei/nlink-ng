@@ -1,9 +1,5 @@
-#[cfg(not(target_os = "android"))]
-pub mod cli;
-#[cfg_attr(target_os = "android", path = "device_android.rs")]
-pub mod device;
+//! TI-84 Evo linking stays in Rust. Everything else lives in nlink/cpp.
 pub mod error;
-pub mod ffi;
+mod evo_ffi;
 pub mod link;
 pub mod progress;
-pub mod viewframe;

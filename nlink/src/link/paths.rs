@@ -1,5 +1,14 @@
-use crate::device::FileInfo;
 use crate::error::{NlinkError, Result};
+use serde::Serialize;
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileInfo {
+  pub path: String,
+  pub is_dir: bool,
+  pub date: u64,
+  pub size: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Var {
